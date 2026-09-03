@@ -152,9 +152,9 @@ def main() -> None:
                 st.caption(f"{name.replace('_', ' ').title()}: {value}")
         uploaded_files = st.file_uploader(
             "Upload documents",
-            type=["xlsx", "xls", "csv", "pptx", "ppt"],
+            type=["xlsx", "xls", "csv", "pptx", "ppt", "docx", "doc"],
             accept_multiple_files=True,
-            help="Legacy .xls and .ppt files are identified and receive a conversion message in this prototype.",
+            help="Legacy .xls, .ppt, and .doc files are identified and receive a conversion message in this prototype.",
         )
         if st.button("Index uploaded files", type="primary", disabled=not uploaded_files):
             for uploaded in uploaded_files or []:
@@ -186,10 +186,12 @@ def main() -> None:
         type_options = ["All types", *service.store.filter_values("file_type")]
         sheet_options = ["All sheets", *service.store.filter_values("sheet_name")]
         slide_options = ["All slides", *service.store.filter_values("slide_number")]
+        section_options = ["All sections", *service.store.filter_values("section_title")]
         selected_file = st.selectbox("File", file_options)
         selected_type = st.selectbox("Format", type_options)
         selected_sheet = st.selectbox("Excel sheet", sheet_options)
         selected_slide = st.selectbox("PowerPoint slide", slide_options)
+        selected_section = st.selectbox("Word section", section_options)
         confirm_clear = st.checkbox("I understand this removes this session's index")
         if st.button("Clear knowledge base", disabled=not confirm_clear):
             service.store.clear()
@@ -221,6 +223,8 @@ def main() -> None:
                     filters["sheet_name"] = selected_sheet
                 if selected_slide != "All slides":
                     filters["slide_number"] = int(selected_slide)
+                if selected_section != "All sections":
+                    filters["section_title"] = selected_section
                 response = service.answer(prompt, filters)
             st.markdown(response.answer)
             citations = [source.citation() for source in response.sources]

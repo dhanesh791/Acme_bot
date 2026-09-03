@@ -7,21 +7,24 @@ from .models import Chunk, ExtractedRecord, SourceMetadata
 
 
 def _chunk_id(text: str, source: SourceMetadata) -> str:
-    seed = f"{source.document_id}|{source.sheet_name}|{source.row_start}|{source.slide_number}|{text}"
+    seed = (
+        f"{source.document_id}|{source.sheet_name}|{source.section_title}|"
+        f"{source.row_start}|{source.slide_number}|{source.paragraph_start}|{text}"
+    )
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
 
 def chunk_records(records: list[ExtractedRecord], rows_per_chunk: int = 6, max_chars: int = 2400, overlap_chars: int = 180) -> list[Chunk]:
-    """Keep contiguous table rows together; split long slide/text records by size."""
-    grouped: dict[tuple[str, str | None, int | None], list[ExtractedRecord]] = defaultdict(list)
+    """Keep contiguous table rows together; split long slide/section/text records by size."""
+    grouped: dict[tuple[str, str | None, int | None, str | None], list[ExtractedRecord]] = defaultdict(list)
     for record in records:
         source = record.source
-        grouped[(source.document_id, source.sheet_name, source.slide_number)].append(record)
+        grouped[(source.document_id, source.sheet_name, source.slide_number, source.section_title)].append(record)
 
     chunks: list[Chunk] = []
     for group_records in grouped.values():
         first_source = group_records[0].source
-        if first_source.slide_number is not None:
+        if first_source.slide_number is not None or first_source.paragraph_start is not None:
             combined = ExtractedRecord(
                 text="\n".join(record.text for record in group_records),
                 source=first_source,

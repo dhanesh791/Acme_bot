@@ -93,6 +93,9 @@ def _entry_for_lance(chunk: Chunk, vector: list[float], embedding_model: str) ->
         "row_end": source.row_end or 0,
         "slide_number": source.slide_number or 0,
         "slide_title": source.slide_title or "",
+        "section_title": source.section_title or "",
+        "paragraph_start": source.paragraph_start or 0,
+        "paragraph_end": source.paragraph_end or 0,
     }
 
 
@@ -101,10 +104,12 @@ def _source_from_lance(entry: dict) -> SourceMetadata:
         file_name=entry["file_name"], file_type=entry["file_type"], document_id=entry["document_id"],
         sheet_name=entry["sheet_name"] or None, row_start=entry["row_start"] or None, row_end=entry["row_end"] or None,
         slide_number=entry["slide_number"] or None, slide_title=entry["slide_title"] or None,
+        section_title=entry["section_title"] or None,
+        paragraph_start=entry["paragraph_start"] or None, paragraph_end=entry["paragraph_end"] or None,
     )
 
 
-ALLOWED_FILTERS = {"file_name", "file_type", "sheet_name", "slide_number"}
+ALLOWED_FILTERS = {"file_name", "file_type", "sheet_name", "slide_number", "section_title"}
 
 
 def _where_clause(filters: dict[str, str | int]) -> str | None:

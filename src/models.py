@@ -14,16 +14,26 @@ class SourceMetadata:
     row_end: int | None = None
     slide_number: int | None = None
     slide_title: str | None = None
+    section_title: str | None = None
+    paragraph_start: int | None = None
+    paragraph_end: int | None = None
 
     def citation(self) -> str:
         parts = [self.file_name]
         if self.sheet_name:
             parts.append(self.sheet_name)
+        if self.section_title:
+            parts.append(self.section_title)
         if self.row_start is not None:
             row_range = str(self.row_start)
             if self.row_end is not None and self.row_end != self.row_start:
                 row_range += f"-{self.row_end}"
             parts.append(f"row {row_range}")
+        if self.paragraph_start is not None:
+            para_range = str(self.paragraph_start)
+            if self.paragraph_end is not None and self.paragraph_end != self.paragraph_start:
+                para_range += f"-{self.paragraph_end}"
+            parts.append(f"paragraph {para_range}")
         if self.slide_number is not None:
             slide = f"Slide {self.slide_number}"
             if self.slide_title:

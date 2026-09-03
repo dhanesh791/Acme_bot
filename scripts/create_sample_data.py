@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
 
@@ -33,6 +34,29 @@ def main() -> None:
     slide.shapes.title.text = "Regional Performance"
     slide.placeholders[1].text = "South delivered $4.2M against a $4.0M target. Enterprise retention in South was 94%."
     deck.save(SAMPLE_DIR / "q1_business_review.pptx")
+
+    memo = Document()
+    memo.add_heading("Q1 Business Review — Executive Summary", level=0)
+    memo.add_heading("Executive Summary", level=1)
+    memo.add_paragraph(
+        "Acme Retail delivered a strong first quarter. The South region led performance, "
+        "exceeding its Q1 revenue target by 5%, while Enterprise customer retention across "
+        "regions remained above 90%."
+    )
+    memo.add_heading("Regional Highlights", level=1)
+    table = memo.add_table(rows=1, cols=4)
+    header_cells = table.rows[0].cells
+    for cell, heading in zip(header_cells, ["Region", "Q1 Revenue", "Q1 Target", "Attainment"]):
+        cell.text = heading
+    for region, revenue, target, attainment in [
+        ("North", "3800000", "4000000", "95%"),
+        ("South", "4200000", "4000000", "105%"),
+        ("East", "3100000", "3500000", "89%"),
+    ]:
+        row_cells = table.add_row().cells
+        for cell, value in zip(row_cells, [region, revenue, target, attainment]):
+            cell.text = value
+    memo.save(SAMPLE_DIR / "q1_summary_memo.docx")
 
 
 if __name__ == "__main__":

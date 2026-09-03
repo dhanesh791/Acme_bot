@@ -181,12 +181,12 @@ def _extractive_answer(evidence: tuple[RetrievedChunk, ...]) -> str:
 
 
 def _diversify(candidates: list[RetrievedChunk], limit: int, max_per_source: int) -> list[RetrievedChunk]:
-    """Favor coverage across files/sheets/slides without discarding useful adjacent table chunks."""
+    """Favor coverage across files/sheets/slides/sections without discarding useful adjacent table chunks."""
     selected: list[RetrievedChunk] = []
-    counts: dict[tuple[str, str | None, int | None], int] = {}
+    counts: dict[tuple[str, str | None, int | None, str | None], int] = {}
     for candidate in candidates:
         source = candidate.chunk.source
-        key = (source.file_name, source.sheet_name, source.slide_number)
+        key = (source.file_name, source.sheet_name, source.slide_number, source.section_title)
         if counts.get(key, 0) >= max_per_source:
             continue
         selected.append(candidate)

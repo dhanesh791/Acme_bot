@@ -1,10 +1,12 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import io
 import json
 import os
 import time
 
 import pytest
+from docx import Document as WordDocument
 
 from src.chunking import chunk_records
 from src.config import Settings
@@ -14,6 +16,24 @@ from src.generation import OpenAIAnswerGenerator
 from src.models import Chunk, ExtractedRecord, RetrievedChunk, SourceMetadata
 from src.parsers import DocumentParseError, parse_document
 from src.service import GUARDRAIL_REFUSAL, NO_ANSWER, RagService, _diversify, _is_llm_refusal
+
+
+def _build_word_bytes(paragraphs: list[tuple[str, str]], table: list[list[str]] | None = None) -> bytes:
+    """paragraphs: (style, text) pairs, e.g. [("Heading 1", "Overview"), ("Normal", "Body text.")]."""
+    document = WordDocument()
+    for style, text in paragraphs:
+        document.add_paragraph(text, style=style)
+    if table:
+        word_table = document.add_table(rows=1, cols=len(table[0]))
+        for cell, value in zip(word_table.rows[0].cells, table[0]):
+            cell.text = value
+        for row_values in table[1:]:
+            row_cells = word_table.add_row().cells
+            for cell, value in zip(row_cells, row_values):
+                cell.text = value
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 def test_csv_records_preserve_headers_and_rows() -> None:
@@ -28,6 +48,7 @@ def test_csv_records_preserve_headers_and_rows() -> None:
     ("customer_sales.csv", "csv", 3),
     ("sales_q1.xlsx", "excel", 3),
     ("q1_business_review.pptx", "powerpoint", 2),
+    ("q1_summary_memo.docx", "word", 5),
 ])
 def test_sample_formats_parse_with_traceable_metadata(name: str, expected_type: str, expected_records: int) -> None:
     path = Path("sample_data") / name
@@ -48,11 +69,18 @@ def test_table_chunks_preserve_row_ranges() -> None:
 def test_legacy_and_unsupported_documents_get_helpful_errors() -> None:
     with pytest.raises(DocumentParseError, match="legacy binary"):
         parse_document("old.xls", b"not a workbook")
+    with pytest.raises(DocumentParseError, match="legacy binary"):
+        parse_document("old.doc", b"not a word document")
     with pytest.raises(DocumentParseError, match="Unsupported"):
         parse_document("notes.pdf", b"pdf")
 
 
-@pytest.mark.parametrize("name,payload", [("broken.xlsx", b"not-a-zip"), ("broken.pptx", b"not-a-zip"), ("broken.csv", b'"unterminated')])
+@pytest.mark.parametrize("name,payload", [
+    ("broken.xlsx", b"not-a-zip"),
+    ("broken.pptx", b"not-a-zip"),
+    ("broken.docx", b"not-a-zip"),
+    ("broken.csv", b'"unterminated'),
+])
 def test_corrupt_supported_files_fail_safely(name: str, payload: bytes) -> None:
     with pytest.raises(DocumentParseError):
         parse_document(name, payload)
@@ -151,8 +179,57 @@ def test_slide_text_uses_overlap_and_keeps_slide_metadata() -> None:
 def test_mixed_document_chunks_keep_origin_metadata() -> None:
     csv = parse_document("customer_sales.csv", (Path("sample_data") / "customer_sales.csv").read_bytes())
     deck = parse_document("q1_business_review.pptx", (Path("sample_data") / "q1_business_review.pptx").read_bytes())
-    chunks = chunk_records([*csv, *deck])
-    assert {chunk.source.file_type for chunk in chunks} == {"csv", "powerpoint"}
+    memo = parse_document("q1_summary_memo.docx", (Path("sample_data") / "q1_summary_memo.docx").read_bytes())
+    chunks = chunk_records([*csv, *deck, *memo])
+    assert {chunk.source.file_type for chunk in chunks} == {"csv", "powerpoint", "word"}
+
+
+def test_word_document_extracts_sections_and_tables_with_citations() -> None:
+    payload = _build_word_bytes(
+        [("Heading 1", "Overview"), ("Normal", "Acme opened three new stores this quarter.")],
+        table=[["Region", "Revenue"], ["South", "4200000"]],
+    )
+    records = parse_document("report.docx", payload)
+    assert [r.source.file_type for r in records] == ["word", "word"]
+    section_record = next(r for r in records if r.source.row_start is None)
+    assert section_record.source.citation() == "report.docx -> Overview -> paragraph 2"
+    assert "Acme opened three new stores" in section_record.text
+    table_record = next(r for r in records if r.source.row_start is not None)
+    assert table_record.source.citation() == "report.docx -> Overview - Table 1 -> row 2"
+    assert "Region: South | Revenue: 4200000" in table_record.text
+
+
+def test_word_table_rows_batch_into_row_range_chunks() -> None:
+    payload = _build_word_bytes(
+        [("Heading 1", "Regional Highlights")],
+        table=[["Region", "Revenue"], ["North", "1"], ["South", "2"], ["East", "3"]],
+    )
+    records = parse_document("report.docx", payload)
+    chunks = chunk_records(records, rows_per_chunk=2)
+    assert len(chunks) == 2
+    assert chunks[0].source.row_start == 2
+    assert chunks[0].source.row_end == 3
+    assert chunks[0].source.section_title == "Regional Highlights - Table 1"
+
+
+def test_word_section_text_uses_overlap_and_keeps_section_metadata() -> None:
+    source = SourceMetadata("report.docx", "word", "doc-1", section_title="Overview", paragraph_start=2, paragraph_end=2)
+    record = ExtractedRecord("A" * 40 + "B" * 40, source)
+    chunks = chunk_records([record], max_chars=50, overlap_chars=10)
+    assert len(chunks) == 2
+    assert chunks[0].text[-10:] == chunks[1].text[:10]
+    assert all(chunk.source.section_title == "Overview" for chunk in chunks)
+
+
+def test_metadata_filters_limit_retrieval_to_selected_word_section(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, min_retrieval_score=0.01))
+    overview_payload = _build_word_bytes([("Heading 1", "Overview"), ("Normal", "South region revenue grew significantly this quarter.")])
+    outlook_payload = _build_word_bytes([("Heading 1", "Outlook"), ("Normal", "South region revenue is expected to grow again next quarter.")])
+    service.index_document("report.docx", overview_payload)
+    service.index_document("outlook.docx", outlook_payload)
+    response = service.answer("What is South region revenue?", {"section_title": "Outlook"})
+    assert not response.is_no_answer
+    assert all(source.section_title == "Outlook" for source in response.sources)
 
 
 def test_embedding_batches_retry_before_index_write(tmp_path: Path) -> None:
@@ -195,7 +272,7 @@ def test_end_to_end_multi_document_and_no_answer_acceptance(tmp_path: Path) -> N
     cited_files = {source.file_name for source in response.sources}
     assert not response.is_no_answer
     assert {"sales_q1.xlsx", "q1_business_review.pptx"}.issubset(cited_files)
-    no_answer = RagService(Settings(data_dir=tmp_path, min_retrieval_score=0.12)).answer("What is Acme's vacation policy?")
+    no_answer = RagService(Settings(data_dir=tmp_path, min_retrieval_score=0.12)).answer("What is the employee vacation policy?")
     assert no_answer.is_no_answer
 
 

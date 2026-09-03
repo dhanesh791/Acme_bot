@@ -7,13 +7,20 @@ from pathlib import Path
 from typing import Iterable
 from zipfile import ZipFile, is_zipfile
 
+from docx import Document
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table as WordTable
+from docx.text.paragraph import Paragraph as WordParagraph
 from openpyxl import load_workbook
 from pptx import Presentation
 
 from .models import ExtractedRecord, SourceMetadata
 
 
-SUPPORTED_SUFFIXES = {".xlsx", ".xls", ".csv", ".pptx", ".ppt"}
+SUPPORTED_SUFFIXES = {".xlsx", ".xls", ".csv", ".pptx", ".ppt", ".docx", ".doc"}
+_OOXML_ZIP_ROOTS = {".xlsx": "xl/", ".pptx": "ppt/", ".docx": "word/"}
+_LEGACY_CONVERSION_TARGET = {".xls": ".xlsx", ".ppt": ".pptx", ".doc": ".docx"}
 
 
 class DocumentParseError(ValueError):
@@ -31,12 +38,12 @@ def parse_document(file_name: str, payload: bytes) -> list[ExtractedRecord]:
         raise DocumentParseError(f"Unsupported file type '{suffix or 'unknown'}'.")
     if not payload:
         raise DocumentParseError("The uploaded file is empty.")
-    if suffix in {".xlsx", ".pptx"} and not is_zipfile(io.BytesIO(payload)):
+    if suffix in _OOXML_ZIP_ROOTS and not is_zipfile(io.BytesIO(payload)):
         raise DocumentParseError(f"'{file_name}' is not a valid {suffix} file.")
-    if suffix in {".xlsx", ".pptx"}:
+    if suffix in _OOXML_ZIP_ROOTS:
         with ZipFile(io.BytesIO(payload)) as archive:
             names = set(archive.namelist())
-        expected_root = "xl/" if suffix == ".xlsx" else "ppt/"
+        expected_root = _OOXML_ZIP_ROOTS[suffix]
         if "[Content_Types].xml" not in names or not any(name.startswith(expected_root) for name in names):
             raise DocumentParseError(f"'{file_name}' does not contain a valid {suffix[1:].upper()} package.")
     doc_id = document_id(file_name, payload)
@@ -47,13 +54,15 @@ def parse_document(file_name: str, payload: bytes) -> list[ExtractedRecord]:
             return parse_excel(file_name, payload, doc_id)
         if suffix == ".pptx":
             return parse_powerpoint(file_name, payload, doc_id)
+        if suffix == ".docx":
+            return parse_word(file_name, payload, doc_id)
     except DocumentParseError:
         raise
     except Exception as exc:
         raise DocumentParseError(f"Could not read '{file_name}': {exc}") from exc
     raise DocumentParseError(
         f"'{suffix}' is a legacy binary format. Convert it to "
-        f"'{'.xlsx' if suffix == '.xls' else '.pptx'}' and upload it again."
+        f"'{_LEGACY_CONVERSION_TARGET[suffix]}' and upload it again."
     )
 
 
@@ -151,6 +160,106 @@ def parse_excel(file_name: str, payload: bytes, doc_id: str) -> list[ExtractedRe
         records.extend(_table_record(file_name, "excel", doc_id, headers, data_rows, worksheet.title, tuple(warnings)))
     if not records:
         raise DocumentParseError("No populated data rows were found in this workbook.")
+    return records
+
+
+def _word_table_records(
+    file_name: str,
+    doc_id: str,
+    headers: list[str],
+    rows: Iterable[tuple[int, list[str]]],
+    section_label: str,
+) -> list[ExtractedRecord]:
+    records: list[ExtractedRecord] = []
+    labelled_headers = [header or f"Column {index + 1}" for index, header in enumerate(headers)]
+    for row_number, values in rows:
+        fields = [f"{header}: {value}" for header, value in zip(labelled_headers, values) if value]
+        if fields:
+            records.append(
+                ExtractedRecord(
+                    text=f"{section_label}\n" + " | ".join(fields),
+                    source=SourceMetadata(
+                        file_name=file_name,
+                        file_type="word",
+                        document_id=doc_id,
+                        section_title=section_label,
+                        row_start=row_number,
+                        row_end=row_number,
+                    ),
+                )
+            )
+    return records
+
+
+def _iter_block_items(document: Document) -> Iterable[WordParagraph | WordTable]:
+    """Yield paragraphs and tables from a Word document body, in document order."""
+    for child in document.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            yield WordParagraph(child, document)
+        elif isinstance(child, CT_Tbl):
+            yield WordTable(child, document)
+
+
+def parse_word(file_name: str, payload: bytes, doc_id: str) -> list[ExtractedRecord]:
+    document = Document(io.BytesIO(payload))
+    records: list[ExtractedRecord] = []
+    current_section: str | None = None
+    section_buffer: list[str] = []
+    section_start: int | None = None
+    section_end: int | None = None
+    paragraph_index = 0
+    table_index = 0
+
+    def flush_section() -> None:
+        nonlocal section_buffer, section_start, section_end
+        if section_buffer:
+            prefix = f"Section: {current_section}\n" if current_section else ""
+            records.append(
+                ExtractedRecord(
+                    text=prefix + "\n".join(section_buffer),
+                    source=SourceMetadata(
+                        file_name=file_name,
+                        file_type="word",
+                        document_id=doc_id,
+                        section_title=current_section,
+                        paragraph_start=section_start,
+                        paragraph_end=section_end,
+                    ),
+                )
+            )
+        section_buffer = []
+        section_start = None
+        section_end = None
+
+    for block in _iter_block_items(document):
+        if isinstance(block, WordParagraph):
+            paragraph_index += 1
+            text = _stringify(block.text)
+            if not text:
+                continue
+            style_name = (block.style.name or "") if block.style else ""
+            if style_name.lower().startswith("heading"):
+                flush_section()
+                current_section = text
+                continue
+            if section_start is None:
+                section_start = paragraph_index
+            section_end = paragraph_index
+            section_buffer.append(text)
+        else:
+            flush_section()
+            table_index += 1
+            label = f"{current_section} - Table {table_index}" if current_section else f"Table {table_index}"
+            rows = list(block.rows)
+            headers = [_stringify(cell.text) for cell in rows[0].cells] if rows else []
+            data_rows = [
+                (row_number, [_stringify(cell.text) for cell in row.cells])
+                for row_number, row in enumerate(rows[1:], start=2)
+            ]
+            records.extend(_word_table_records(file_name, doc_id, headers, data_rows, label))
+    flush_section()
+    if not records:
+        raise DocumentParseError("No readable text or tables were found in this document.")
     return records
 
 

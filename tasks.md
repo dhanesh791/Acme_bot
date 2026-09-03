@@ -27,11 +27,11 @@ The main invariant is traceability: metadata is created at extraction time and s
 
 ## Current status
 
-Verified against the code on 2026-09-03. All nine gaps found in the review pass (G1-G9) were fixed the same day; see **Gaps found in verification review** below, each now marked Fixed with what changed.
+Verified against the code on 2026-09-03. All nine gaps found in the review pass (G1-G9) were fixed the same day; see **Gaps found in verification review** below, each now marked Fixed with what changed. Since then: a local git repository was initialized (see below), the Streamlit UI was given Acme Retail branding, and Word (`.docx`) support was added as an explicit scope addition beyond the original brief — see **§10**.
 
-- `python -m pytest -q --basetemp=<short path>` -> **34 passed** (26 original + 8 new tests covering the fixes: OpenAI provider/generator with a stubbed transport, embedding-model mismatch guards on index and query, targeted reindex-without-overwrite, LLM refusal detection, and the slide-group data-loss fix).
-- The plain `python -m pytest -q` in the README still errors under this machine's OneDrive path (Windows `MAX_PATH`, not a code defect); README now documents the `--basetemp` workaround.
-- The repo is **still not its own git repository** — `git rev-parse --show-toplevel` resolves to `C:/Users/Kakashi` and every file here is untracked. Unchanged by this pass; flagged again in case it matters for the deliverable.
+- `python -m pytest -q --basetemp=<short path>` -> **40 passed** (34 after the G1-G9 fix pass + 6 new: Word structure/citation extraction, Word table row-range chunking, Word section-text overlap chunking, Word section-filtered retrieval, a corrupt-`.docx` case, and a legacy-`.doc` case).
+- The plain `python -m pytest -q` in the README still errors under this machine's OneDrive path (Windows `MAX_PATH`, not a code defect); README documents the `--basetemp` workaround.
+- The repo **is now its own git repository** (`git init`, initial commit `0847c2b`, UI-branding commit `4c9ac02`), independent of the enclosing `C:/Users/Kakashi` repo. Not yet pushed to a remote, per explicit instruction to push later.
 
 All items below are now checked and hold up against the code as of this pass.
 
@@ -144,9 +144,26 @@ All items below are now checked and hold up against the code as of this pass.
 - [x] Document privacy/security assumptions, file retention, dependency/model limitations, and known legacy-format limitations.
 - [x] Prepare a short demo script: upload files, index them, answer a single-source question, answer a multi-source question, show citations, and demonstrate no-answer behavior.
 
+## 10. Word (.docx) support — scope addition beyond the original use case
+
+The original brief ([RAG_Multi_Format_Document_Chatbot_Use_Case.md](RAG_Multi_Format_Document_Chatbot_Use_Case.md)) scopes this project to Excel, CSV, and PowerPoint only (§4: Input Data). Word support was added on 2026-09-03 at explicit request, after the user hit Streamlit's built-in rejection message for an uploaded `.docx` file and asked for it to be supported. Documenting the decision here rather than editing the original brief, which should stay as given.
+
+- [x] Add a `parse_word` parser (`src/parsers.py`) using `python-docx`, iterating the document body in order (`CT_P`/`CT_Tbl`) so paragraphs and tables interleave correctly instead of being read as two disconnected lists.
+- [x] Treat `Heading n`-styled paragraphs as section boundaries; group body paragraphs under their nearest preceding heading into one record (paragraph-range metadata), mirroring how a PPTX slide becomes one record.
+- [x] Extract tables independently of surrounding prose, row-by-row (matching the CSV/Excel/`_table_record` convention: first row = headers, 1-based data rows), tagged with a section label unique per table (`<heading> - Table k`) so multiple tables under one heading never collide in chunking/grouping.
+- [x] Extend `SourceMetadata` with `section_title`, `paragraph_start`, `paragraph_end`; extend `citation()` to render `file -> section -> paragraph N-M` for body text and `file -> section - Table k -> row N` for table rows.
+- [x] Extend `chunk_records`' grouping key and text-vs-table routing to cover Word records (`section_title` added to the group key; `paragraph_start is not None` routed through the same combine-and-overlap path as slides) without changing CSV/Excel/PowerPoint behavior (verified: existing 34 tests still pass unchanged).
+- [x] Persist the three new fields in LanceDB (`src/vector_store.py`); add `section_title` to `ALLOWED_FILTERS` and `_diversify`'s dedup key so Word chunks from different sections aren't over-collapsed during retrieval diversification.
+- [x] Support `.docx` OOXML-zip validation (`word/` root, same `[Content_Types].xml` check as `.xlsx`/`.pptx`) and a `.doc` legacy-format conversion error, consistent with the existing `.xls`/`.ppt` pattern.
+- [x] Add `.docx`/`.doc` to the Streamlit uploader's allowed types and update the help text.
+- [x] Add a "Word section" retrieval filter in the sidebar, parallel to the existing Excel-sheet/PowerPoint-slide filters.
+- [x] Add `q1_summary_memo.docx` to `sample_data/` (generated by `scripts/create_sample_data.py`): an Executive Summary section plus a Regional Highlights table repeating the *same* North/South/East Q1 figures already in `sales_q1.xlsx`, so a Q1-revenue question now has four independently-formatted corroborating sources instead of two.
+- [x] Add dedicated tests: structure/citation extraction from a synthetic in-memory `.docx`, table row-range chunking, section-text overlap chunking, section-filtered retrieval, a corrupt-`.docx` case, and a legacy-`.doc` case. Extended the sample-format and mixed-document tests to include the new file. **Fixed a real regression this surfaced:** the new sample memo's prose contains the word "Acme," which gave the existing "What is Acme's vacation policy?" no-answer acceptance test accidental lexical overlap under the hash-embedding gate; the test (and the equivalent DEMO.md step) were reworded to "What is the employee vacation policy?" to restore zero-overlap intent.
+- [x] Update README.md, DEMO.md, and EVALUATION.md for the new format, filter, sample file, and demo steps.
+
 ## Definition of done
 
-- [x] A user can upload multiple valid Excel, CSV, and PowerPoint files in one session and see per-file indexing results.
+- [x] A user can upload multiple valid Excel, CSV, PowerPoint, and Word files in one session and see per-file indexing results.
 - [x] Retrieved chunks retain correct source metadata from parsing through final answer citations.
 - [x] The chatbot answers supported questions using evidence from one or more indexed documents and displays supporting locations.
 - [x] The chatbot declines to answer when the indexed evidence is insufficient.

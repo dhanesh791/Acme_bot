@@ -1,16 +1,18 @@
 # Acme Retail Multi-Format RAG Chatbot
 
-A small interview prototype for asking grounded questions across CSV, Excel, and PowerPoint files.
+A small interview prototype for asking grounded questions across CSV, Excel, PowerPoint, and Word files.
+
+> **Scope note:** the original brief ([RAG_Multi_Format_Document_Chatbot_Use_Case.md](RAG_Multi_Format_Document_Chatbot_Use_Case.md)) covers Excel, CSV, and PowerPoint only. Word (`.docx`) support was added afterward at explicit request; see `tasks.md` §10 for the decision record.
 
 ## What it does
 
-- Upload and index `.csv`, `.xlsx`, and `.pptx` documents.
-- Preserve source metadata: file, CSV row, Excel sheet/row range, and PowerPoint slide/title.
+- Upload and index `.csv`, `.xlsx`, `.pptx`, and `.docx` documents.
+- Preserve source metadata: file, CSV row, Excel sheet/row range, PowerPoint slide/title, and Word section/paragraph range.
 - Retrieve matching chunks using deterministic local hash embeddings and return only retrieved evidence.
 - Show citations and inspect the exact retrieved chunks in the chat UI.
 - Decline questions that lack relevant indexed evidence.
 
-Legacy `.xls` and `.ppt` files are detected but intentionally require conversion to modern formats for this prototype. PowerPoint speaker notes are extracted when present and exposed by the library.
+Legacy `.xls`, `.ppt`, and `.doc` files are detected but intentionally require conversion to modern formats for this prototype. PowerPoint speaker notes are extracted when present and exposed by the library. Word documents are parsed in document order: `Heading n`-styled paragraphs become section boundaries, body paragraphs are grouped under their nearest preceding heading, and tables are extracted row-by-row independently of surrounding prose.
 
 ## Run it
 
@@ -19,7 +21,7 @@ python -m pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open the local address Streamlit prints. Upload the three files in `sample_data/`, click **Index uploaded files**, then ask: `What was South region's Q1 revenue and target attainment?`
+Open the local address Streamlit prints. Upload the four files in `sample_data/`, click **Index uploaded files**, then ask: `What was South region's Q1 revenue and target attainment?`
 
 ## Design
 
@@ -29,7 +31,7 @@ The default deterministic embedding and extractive response modes do not require
 
 ### Metadata and storage
 
-Rows and slides use one-based positions. CSV and Excel citations show `file -> sheet (when present) -> row N-M`; PowerPoint citations show `file -> Slide N (title)`. Metadata remains attached to each LanceDB vector and can filter retrieval by file, format, sheet, or slide.
+Rows, slides, and paragraphs use one-based positions. CSV and Excel citations show `file -> sheet (when present) -> row N-M`; PowerPoint citations show `file -> Slide N (title)`; Word citations show `file -> section (when present) -> paragraph N-M` for body text, or `file -> section - Table k -> row N` for a table row. Metadata remains attached to each LanceDB vector and can filter retrieval by file, format, sheet, slide, or Word section.
 
 Each browser session receives its own LanceDB namespace under `data/lance/`; clearing the knowledge base deletes only that session's namespace. Uploaded bytes are processed in memory and are not retained by the application. Local index files and logs are excluded from Git. This prototype has no authentication, so it should not be exposed as a shared public deployment.
 
