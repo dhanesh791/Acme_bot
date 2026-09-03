@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import uuid
 
 import streamlit as st
@@ -12,6 +13,123 @@ from src.service import RagService
 st.set_page_config(page_title="Acme Retail Knowledge Chat", page_icon="🛍️", layout="wide")
 
 
+THEME_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.acme-header {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 1.15rem 1.5rem;
+    margin-bottom: 1.4rem;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #4338CA 0%, #4F46E5 55%, #6366F1 100%);
+    color: #FFFFFF;
+}
+.acme-header__mark {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.16);
+    border-radius: 10px;
+}
+.acme-header__mark svg { width: 24px; height: 24px; color: #FFFFFF; }
+.acme-header__title {
+    font-size: 1.45rem;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.25;
+    color: #FFFFFF;
+}
+.acme-header__subtitle {
+    font-size: 0.9rem;
+    margin: 0.2rem 0 0;
+    color: rgba(255, 255, 255, 0.88);
+}
+
+section[data-testid="stSidebar"] {
+    border-right: 1px solid #E5E7EB;
+}
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    font-weight: 600;
+    color: #1F2937;
+}
+
+.acme-citation-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.35rem 0 0.5rem;
+}
+.acme-citation-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.22rem 0.65rem;
+    border-radius: 999px;
+    background: #EEF2FF;
+    color: #4338CA;
+    font-size: 0.78rem;
+    font-weight: 500;
+    border: 1px solid #E0E7FF;
+    white-space: nowrap;
+}
+
+.stButton > button {
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+[data-testid="stChatMessage"] {
+    border-radius: 12px;
+}
+
+[data-testid="stMetricValue"] {
+    color: #4338CA;
+}
+"""
+
+HEADER_HTML = """
+<div class="acme-header">
+  <div class="acme-header__mark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"></path>
+      <path d="M3 6h18"></path>
+      <path d="M16 10a4 4 0 0 1-8 0"></path>
+    </svg>
+  </div>
+  <div>
+    <p class="acme-header__title">Acme Retail Knowledge Chat</p>
+    <p class="acme-header__subtitle">Ask questions across uploaded Excel, CSV, and PowerPoint documents. Answers are limited to indexed evidence.</p>
+  </div>
+</div>
+"""
+
+
+def inject_theme() -> None:
+    st.markdown(f"<style>{THEME_CSS}</style>", unsafe_allow_html=True)
+
+
+def render_header() -> None:
+    st.markdown(HEADER_HTML, unsafe_allow_html=True)
+
+
+def render_citations(citations: list[str]) -> None:
+    """Render source citations as pill badges. Values are user-controlled (uploaded file
+    names), so every citation is HTML-escaped before interpolation."""
+    if not citations:
+        return
+    pills = "".join(f'<span class="acme-citation-pill">{html.escape(citation)}</span>' for citation in citations)
+    st.markdown(f'<div class="acme-citation-row">{pills}</div>', unsafe_allow_html=True)
+
+
 def initialize_state() -> None:
     RagService.cleanup_expired_workspaces()
     st.session_state.setdefault("messages", [])
@@ -20,23 +138,16 @@ def initialize_state() -> None:
     st.session_state.setdefault("service", RagService(workspace_id=st.session_state.workspace_id))
 
 
-def show_sources(response) -> None:
-    if response.sources:
-        st.markdown("**Sources**")
-        for source in response.sources:
-            st.caption(source.citation())
-
-
 def main() -> None:
+    inject_theme()
     initialize_state()
     service: RagService = st.session_state.service
 
-    st.title("Acme Retail Knowledge Chat")
-    st.caption("Ask questions across uploaded Excel, CSV, and PowerPoint documents. Answers are limited to indexed evidence.")
+    render_header()
 
     with st.sidebar:
-        st.header("Knowledge base")
-        with st.expander("System status"):
+        st.header("📚 Knowledge base")
+        with st.expander("⚙️ System status"):
             for name, value in service.health_check().items():
                 st.caption(f"{name.replace('_', ' ').title()}: {value}")
         uploaded_files = st.file_uploader(
@@ -70,7 +181,7 @@ def main() -> None:
         st.metric("Indexed documents", service.store.document_count())
         for document in service.store.documents():
             st.caption(document)
-        st.subheader("Retrieval filters")
+        st.subheader("🔎 Retrieval filters")
         file_options = ["All files", *service.store.filter_values("file_name")]
         type_options = ["All types", *service.store.filter_values("file_type")]
         sheet_options = ["All sheets", *service.store.filter_values("sheet_name")]
@@ -92,8 +203,7 @@ def main() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
-                for citation in message.get("citations", []):
-                    st.caption(citation)
+                render_citations(message.get("citations", []))
 
     prompt = st.chat_input("Ask a question about the indexed documents")
     if prompt:
@@ -114,8 +224,7 @@ def main() -> None:
                 response = service.answer(prompt, filters)
             st.markdown(response.answer)
             citations = [source.citation() for source in response.sources]
-            for citation in citations:
-                st.caption(citation)
+            render_citations(citations)
             with st.expander("Retrieved evidence"):
                 if response.evidence:
                     for result in response.evidence:
