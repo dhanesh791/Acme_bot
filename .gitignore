@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+data/uploads/
+data/lance/
+data/*.log
+.pytest_cache/
