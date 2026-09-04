@@ -519,3 +519,13 @@ def test_rerank_score_gate_catches_what_cosine_similarity_misses(tmp_path: Path)
     response = service.answer("What is the employee vacation policy?")
     assert response.is_no_answer
     assert response.answer == NO_ANSWER
+
+
+def test_default_stack_filtered_excel_query_returns_evidence(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="local", use_reranker=True, min_retrieval_score=0.01))
+    workbook = (Path("sample_data") / "sales_q1.xlsx")
+    service.index_document(workbook.name, workbook.read_bytes())
+    response = service.answer("What is South revenue?", {"file_name": "sales_q1.xlsx", "file_type": "excel"})
+    assert not response.is_no_answer
+    assert response.sources[0].file_name == "sales_q1.xlsx"
+    assert "4200000" in response.answer or "4,200,000" in response.answer

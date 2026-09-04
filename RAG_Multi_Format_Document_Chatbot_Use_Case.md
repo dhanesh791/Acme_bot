@@ -29,7 +29,7 @@ Build a small but production-oriented prototype that can:
 3. Suggested Business Scenario
 
 Use a fictional company named Acme Retail. The knowledge base contains quarterly business reviews, sales targets, regional performance data, product information, and operating metrics. The chatbot should answer questions that require information from one or multiple files.
-
+now. 
 4. Input Data
 
 | Format | Example | Expected extraction | Metadata |
