@@ -4,6 +4,7 @@ import functools
 from dataclasses import replace
 from typing import Protocol
 
+from .embeddings import MODEL_CACHE_DIR
 from .models import RetrievedChunk
 
 
@@ -23,7 +24,7 @@ class NoopReranker:
 def _load_cross_encoder(model_name: str):
     from fastembed.rerank.cross_encoder import TextCrossEncoder
 
-    return TextCrossEncoder(model_name=model_name)
+    return TextCrossEncoder(model_name=model_name, cache_dir=MODEL_CACHE_DIR)
 
 
 class CrossEncoderReranker:
