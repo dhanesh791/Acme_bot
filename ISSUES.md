@@ -63,6 +63,45 @@ Full list with file/line detail: `tasks.md`, "Gaps found in verification review.
    vocabulary distance from the corpus — adding sample data can quietly erode that
    distance without touching the test file itself.
 
+## Two application bugs found while rebuilding retrieval as a full RAG pipeline
+
+Asked directly "what methods are we using, I want the best method possible," and
+given the go-ahead for the full option: real local embeddings (`fastembed`), hybrid
+dense+BM25 retrieval, cross-encoder reranking, MMR diversity. Rebuilding the no-answer
+gate around this new pipeline surfaced two real bugs — one from the unit suite, one
+that only live browser verification caught.
+
+9. **Removing the old lexical-overlap gate broke the no-answer test, again — but not
+   for the reason assumed.** The gate looked redundant once hybrid BM25 retrieval was
+   in place (BM25 already handles lexical matching), so it was deleted outright.
+   `test_service_refuses_without_evidence` immediately failed. Investigated instead of
+   reverting blind: the hash embedding provider was confirmed to produce a genuine
+   **0.29 cosine "similarity"** between `"What is the employee vacation policy?"` and
+   an unrelated indexed row — purely from hash collisions in its 256-dimension hashed
+   bag-of-words space, comfortably above the 0.12 threshold. The gate had been doing
+   two *different* jobs the whole time: enabling lexical matching (which hybrid BM25
+   does genuinely supersede) and suppressing hash-collision false positives (which it
+   does not). Reinstated, scoped to the hash provider only.
+10. **The same failure mode reappeared with a real embedding model, and only live
+    verification caught it — the unit suite runs on the hash provider by design and
+    never exercises this path.** Driving the actual Streamlit app with Playwright
+    against the real pipeline, the identical no-answer question — this time with a
+    genuine semantic embedding model (`bge-small-en-v1.5`), not hash collisions —
+    still returned an answer instead of refusing. Measured directly: **0.52 cosine
+    similarity** between that question and an unrelated retention-data row. Not a
+    collision artifact this time — short, telegraphic "`Field: value | Field: value`"
+    table-row text just doesn't give a general-purpose sentence embedding much to
+    discriminate on. The cross-encoder reranker scored the identical pair **-11.4** —
+    correctly and decisively irrelevant. Fix: reranking became a second no-answer gate
+    (`min_rerank_score`), not just a reordering step, for any provider a real reranker
+    actually ran against.
+    **Lesson:** a fast, hermetic unit suite that deliberately runs on a synthetic
+    embedding provider (for good reasons — speed, determinism, no network) will never
+    catch a failure mode that only exists in the real provider's embedding geometry.
+    That gap is exactly what live, real-pipeline verification is for — this bug shipped
+    invisibly through 48 passing unit tests and was only caught by actually using the
+    app.
+
 ## Development/tooling problems (not application bugs)
 
 These didn't ship in the product but cost real time during the session and are worth
@@ -111,3 +150,18 @@ recording so they don't get re-discovered from scratch next time.
   running the launch command as a string, alongside the one real `python.exe`
   process actually holding the socket — and cross-check `CommandLine` per PID to find
   the right one to kill.
+- **Fixed-timeout Playwright waits silently broke once the app's real latency changed.**
+  The browser-automation driver's wait logic (`waitForSelector(spinner, {state:
+  'detached'})` plus a short fixed delay) worked fine against the instant hash-embedding
+  pipeline, then started producing screenshots of *empty, still-loading* chat turns once
+  real local model inference added real latency (~1-3s cold, sub-second warm). Root
+  cause: `waitForSelector(sel, {state: 'detached'})` resolves *immediately* if the
+  selector is never seen attached at all — it does not wait for a genuinely-appearing
+  element to later disappear, it's trivially satisfied by absence. A short fixed pre-wait
+  plus that pattern is a race condition waiting for the backend to become slow enough to
+  expose it. Fixed by waiting on a state-based signal instead: poll for the count of a
+  marker that only exists once a turn is actually fully rendered (here, the "Retrieved
+  evidence" expander) to increase, with a generous timeout, rather than guessing a delay.
+  **Lesson:** a browser-automation wait tuned against a fast backend can pass cleanly for
+  a long time and then fail the moment the backend gets slower — treat "wait for spinner
+  gone" as inherently racy and wait for the actual result to appear instead.
