@@ -11,6 +11,13 @@ The automated regression suite verifies the following acceptance cases against `
 | Grounded local answer | Returned extractive answer includes facts from returned evidence | `test_extractive_answer_is_grounded_in_returned_evidence` |
 | Word structure-awareness | Heading-delimited sections and tables are extracted as separate, correctly cited records | `test_word_document_extracts_sections_and_tables_with_citations`, `test_word_table_rows_batch_into_row_range_chunks` |
 | Word section filtering | Retrieval can be scoped to one Word section via metadata filter | `test_metadata_filters_limit_retrieval_to_selected_word_section` |
+| Local semantic embeddings | The real (non-mocked) local model produces higher cosine similarity for a paraphrase than for unrelated text | `test_fastembed_provider_returns_semantically_meaningful_vectors` |
+| Cross-encoder reranking | The real (non-mocked) reranker model scores a genuinely relevant chunk above an irrelevant one for a given question | `test_cross_encoder_reranker_orders_by_relevance` |
+| Hybrid retrieval | `LocalVectorStore.search` returns fused dense+BM25 candidates, each carrying its embedding vector for downstream MMR | `test_hybrid_search_returns_fused_candidates_with_vectors` |
+| MMR diversity | Near-duplicate same-source candidates don't crowd out a genuinely different source | `test_mmr_selection_prefers_diverse_sources` |
+| Sentence-aware chunking | Oversized free text splits at sentence boundaries, not mid-sentence character cuts | `test_sentence_aware_splitting_breaks_at_sentence_boundaries` |
+| Full pipeline, real models | FastEmbed + hybrid retrieval + reranking + MMR together answer a real multi-document question correctly, citing both `sales_q1.xlsx` and `q1_summary_memo.docx` | `test_full_local_pipeline_answers_grounded_multi_document_question` |
+| Rerank-score no-answer gate | An unrelated question that scores a misleadingly high 0.52 cosine similarity against real embeddings is still correctly refused, because the reranker (which scores the identical pair -11.4) gates the decision | `test_rerank_score_gate_catches_what_cosine_similarity_misses` |
 
 ## Manual review record
 

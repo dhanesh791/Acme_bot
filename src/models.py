@@ -74,6 +74,8 @@ class Chunk:
 class RetrievedChunk:
     chunk: Chunk
     score: float
+    vector: tuple[float, ...] | None = None  # carried through for MMR diversity scoring
+    rerank_score: float | None = None  # set by a real reranker; None means no reranker ran
 
 
 @dataclass(frozen=True)

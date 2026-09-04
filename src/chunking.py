@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
 
 from .models import Chunk, ExtractedRecord, SourceMetadata
+
+
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def _chunk_id(text: str, source: SourceMetadata) -> str:
@@ -53,11 +57,54 @@ def _table_batch_chunks(batch: list[ExtractedRecord], max_chars: int) -> list[Ch
     return [Chunk(_chunk_id(text, source), text, source)]
 
 
+def _split_into_units(text: str) -> list[str]:
+    """Paragraph-then-sentence split, so oversized text breaks at readable boundaries
+    instead of mid-word. Falls back to the whole string when no boundary is found
+    (e.g. a single long run-on line with no sentence punctuation)."""
+    units: list[str] = []
+    for paragraph in text.split("\n"):
+        if not paragraph.strip():
+            continue
+        units.extend(piece for piece in _SENTENCE_SPLIT.split(paragraph) if piece.strip())
+    return units or [text]
+
+
 def _chunk_text_record(record: ExtractedRecord, max_chars: int, overlap_chars: int) -> list[Chunk]:
     text = record.text
     if len(text) <= max_chars:
-        pieces = [text]
-    else:
-        step = max(1, max_chars - overlap_chars)
-        pieces = [text[index : index + max_chars] for index in range(0, len(text), step)]
+        return [Chunk(_chunk_id(text, record.source), text, record.source)]
+
+    pieces: list[str] = []
+    current: list[str] = []
+
+    def current_text() -> str:
+        return " ".join(current)
+
+    for unit in _split_into_units(text):
+        if len(unit) > max_chars:
+            # A single sentence longer than the whole budget: close the pending piece,
+            # then hard-slice this one as a last resort.
+            if current:
+                pieces.append(current_text())
+                current = []
+            step = max(1, max_chars - overlap_chars)
+            pieces.extend(unit[index : index + max_chars] for index in range(0, len(unit), step))
+            continue
+        candidate = f"{current_text()} {unit}".strip() if current else unit
+        if current and len(candidate) > max_chars:
+            pieces.append(current_text())
+            # Seed the next piece with trailing overlap carried from the piece just closed.
+            overlap: list[str] = []
+            overlap_len = 0
+            for prior in reversed(current):
+                if overlap_len + len(prior) > overlap_chars:
+                    break
+                overlap.insert(0, prior)
+                overlap_len += len(prior) + 1
+            current = overlap
+        current.append(unit)
+
+    if current:
+        pieces.append(current_text())
+
     return [Chunk(_chunk_id(piece, record.source), piece, record.source) for piece in pieces]

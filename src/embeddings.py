@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
 import re
@@ -35,6 +36,33 @@ class HashEmbeddingProvider:
 
     def embed_many(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(text) for text in texts]
+
+
+@functools.lru_cache(maxsize=4)
+def _load_fastembed_model(model_name: str):
+    from fastembed import TextEmbedding
+
+    return TextEmbedding(model_name=model_name)
+
+
+class FastEmbedEmbeddingProvider:
+    """Local semantic embeddings via a small ONNX model - no API key, no torch.
+
+    The model is loaded lazily on first use (and cached per process by
+    `_load_fastembed_model`), so constructing this provider is cheap even if it is
+    never actually called, e.g. in tests that override `.embeddings` before use.
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5") -> None:
+        self._model_name = model_name
+        self.model_name = f"fastembed-{model_name}"
+
+    def embed(self, text: str) -> list[float]:
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        model = _load_fastembed_model(self._model_name)
+        return [vector.tolist() for vector in model.embed(texts)]
 
 
 class OpenAIEmbeddingProvider:

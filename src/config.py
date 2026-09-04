@@ -22,9 +22,17 @@ class Settings:
     chunk_max_chars: int = int(os.getenv("CHUNK_MAX_CHARS", "2200"))
     embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
     embedding_max_retries: int = int(os.getenv("EMBEDDING_MAX_RETRIES", "3"))
-    retrieval_candidate_multiplier: int = int(os.getenv("RETRIEVAL_CANDIDATE_MULTIPLIER", "3"))
-    max_chunks_per_source: int = int(os.getenv("MAX_CHUNKS_PER_SOURCE", "2"))
     session_retention_hours: int = int(os.getenv("SESSION_RETENTION_HOURS", "24"))
+    # "auto" = OpenAI when a key is configured, else the local FastEmbed model. "hash" and
+    # "local" force a specific provider regardless of key presence (tests use "hash" for speed).
+    embedding_provider: str = os.getenv("EMBEDDING_PROVIDER", "auto")
+    local_embedding_model: str = os.getenv("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    use_reranker: bool = os.getenv("USE_RERANKER", "true").strip().lower() not in ("0", "false", "no")
+    reranker_model: str = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+    rerank_candidate_pool: int = int(os.getenv("RERANK_CANDIDATE_POOL", "20"))
+    min_rerank_score: float = float(os.getenv("MIN_RERANK_SCORE", "0.0"))
+    rrf_k: int = int(os.getenv("RRF_K", "60"))
+    mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.65"))
 
     @property
     def index_path(self) -> Path:

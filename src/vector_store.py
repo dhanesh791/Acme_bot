@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import lancedb
+from lancedb.index import FTS
 
 from .embeddings import cosine_similarity
+from .logging_config import logger
 from .models import Chunk, RetrievedChunk, SourceMetadata
 
 
@@ -22,33 +24,80 @@ class LocalVectorStore:
             raise ValueError("Each chunk must have exactly one embedding vector.")
         entries = [_entry_for_lance(chunk, vector, embedding_model) for chunk, vector in zip(chunks, vectors)]
         if not self._exists():
-            self.database.create_table(self.collection_name, entries)
-            return len(chunks)
-        table = self.database.open_table(self.collection_name)
-        replaced_files = {chunk.source.file_name for chunk in chunks}
-        for file_name in replaced_files:
-            table.delete(f"file_name = '{file_name.replace("'", "''")}'")
-        table.add(entries)
+            table = self.database.create_table(self.collection_name, entries)
+        else:
+            table = self.database.open_table(self.collection_name)
+            replaced_files = {chunk.source.file_name for chunk in chunks}
+            for file_name in replaced_files:
+                table.delete(f"file_name = '{file_name.replace("'", "''")}'")
+            table.add(entries)
+        self._rebuild_fts_index(table)
         return len(chunks)
 
-    def search(self, query_vector: list[float], top_k: int, filters: dict[str, str | int] | None = None) -> list[RetrievedChunk]:
+    def _rebuild_fts_index(self, table) -> None:
+        """Keep the BM25 full-text index in sync after every write. Cheap enough for a
+        prototype's write volume; a real deployment would batch/schedule this instead."""
+        try:
+            table.create_index("text", config=FTS(), replace=True)
+        except Exception:
+            logger.exception("failed to build full-text search index; hybrid retrieval will fall back to vector-only")
+
+    def search(
+        self,
+        query_text: str,
+        query_vector: list[float],
+        top_k: int,
+        filters: dict[str, str | int] | None = None,
+        rrf_k: int = 60,
+    ) -> list[RetrievedChunk]:
+        """Hybrid retrieval: fuse dense vector search and BM25 full-text search via
+        Reciprocal Rank Fusion for better candidate recall, then re-score every fused
+        candidate by real cosine similarity to the query vector - so downstream
+        thresholding/MMR keep the same familiar 0-1 scale regardless of which lane(s)
+        actually found a given candidate.
+        """
         if not self._exists():
             return []
         table = self.database.open_table(self.collection_name)
-        query = table.search(query_vector)
         where = _where_clause(filters or {})
+
+        vector_query = table.search(query_vector).limit(top_k)
         if where:
-            query = query.where(where)
-        result = query.limit(top_k).to_list()
+            vector_query = vector_query.where(where)
+        vector_hits = vector_query.to_list()
+
+        fts_hits: list[dict] = []
+        if query_text.strip():
+            try:
+                fts_query = table.search(query_text, query_type="fts").limit(top_k)
+                if where:
+                    fts_query = fts_query.where(where)
+                fts_hits = fts_query.to_list()
+            except Exception:
+                logger.exception("full-text search failed; continuing with vector-only results")
+
+        fused_ranks: dict[str, float] = {}
+        entries_by_id: dict[str, dict] = {}
+        for rank, entry in enumerate(vector_hits, start=1):
+            fused_ranks[entry["chunk_id"]] = fused_ranks.get(entry["chunk_id"], 0.0) + 1.0 / (rrf_k + rank)
+            entries_by_id[entry["chunk_id"]] = entry
+        for rank, entry in enumerate(fts_hits, start=1):
+            fused_ranks[entry["chunk_id"]] = fused_ranks.get(entry["chunk_id"], 0.0) + 1.0 / (rrf_k + rank)
+            entries_by_id.setdefault(entry["chunk_id"], entry)
+
         matches: list[RetrievedChunk] = []
-        for entry in result:
+        for chunk_id in fused_ranks:
+            entry = entries_by_id[chunk_id]
+            vector = entry["vector"]
             matches.append(
                 RetrievedChunk(
                     Chunk(entry["chunk_id"], entry["text"], _source_from_lance(entry)),
-                    cosine_similarity(query_vector, entry["vector"]),
+                    cosine_similarity(query_vector, vector),
+                    tuple(vector),
                 )
             )
-        return sorted(matches, key=lambda match: match.score, reverse=True)
+        matches.sort(key=lambda match: match.score, reverse=True)
+        return matches[:top_k]
 
     def clear(self) -> None:
         if self._exists():
