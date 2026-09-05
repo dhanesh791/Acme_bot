@@ -168,6 +168,7 @@ class RagService:
         evidence = tuple(_mmr_select(rerank_gated, self.settings.retrieval_top_k, self.settings.mmr_lambda))
         sources = _unique_sources(evidence)
         answer = _extractive_answer(evidence)
+        used_extractive_fallback = False
         if self.generator:
             try:
                 generated = self.generator.generate(question, evidence)
@@ -178,9 +179,11 @@ class RagService:
                     answer = generated
                 else:
                     logger.warning("generation failed faithfulness gate supported_ratio=%.2f", evaluation.supported_ratio)
+                    used_extractive_fallback = True
             except Exception:
                 logger.exception("generation failed; returning extractive fallback")
-        return ChatResponse(answer=answer, sources=sources, evidence=evidence, is_no_answer=False)
+                used_extractive_fallback = True
+        return ChatResponse(answer=answer, sources=sources, evidence=evidence, is_no_answer=False, used_extractive_fallback=used_extractive_fallback)
 
     def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []

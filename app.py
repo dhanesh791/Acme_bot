@@ -130,6 +130,14 @@ def render_citations(citations: list[str]) -> None:
     st.markdown(f'<div class="acme-citation-row">{pills}</div>', unsafe_allow_html=True)
 
 
+def render_fallback_notice(used_fallback: bool) -> None:
+    """Surface it when a generated answer failed the faithfulness check (or the
+    generation call itself failed) and the extractive fallback is shown instead -
+    previously this only showed up in the log, invisible to the person asking."""
+    if used_fallback:
+        st.caption("ℹ️ The generated answer didn't pass the groundedness check, so this shows the retrieved evidence directly instead.")
+
+
 def initialize_state() -> None:
     RagService.cleanup_expired_workspaces()
     st.session_state.setdefault("messages", [])
@@ -206,6 +214,7 @@ def main() -> None:
             st.markdown(message["content"])
             if message["role"] == "assistant":
                 render_citations(message.get("citations", []))
+                render_fallback_notice(message.get("used_fallback", False))
 
     prompt = st.chat_input("Ask a question about the indexed documents")
     if prompt:
@@ -229,6 +238,7 @@ def main() -> None:
             st.markdown(response.answer)
             citations = [source.citation() for source in response.sources]
             render_citations(citations)
+            render_fallback_notice(response.used_extractive_fallback)
             with st.expander("Retrieved evidence"):
                 if response.evidence:
                     for result in response.evidence:
@@ -237,7 +247,12 @@ def main() -> None:
                 else:
                     st.write("No relevant evidence was retrieved.")
         st.session_state.messages.append(
-            {"role": "assistant", "content": response.answer, "citations": citations}
+            {
+                "role": "assistant",
+                "content": response.answer,
+                "citations": citations,
+                "used_fallback": response.used_extractive_fallback,
+            }
         )
 
 

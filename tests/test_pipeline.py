@@ -529,3 +529,39 @@ def test_default_stack_filtered_excel_query_returns_evidence(tmp_path: Path) -> 
     assert not response.is_no_answer
     assert response.sources[0].file_name == "sales_q1.xlsx"
     assert "4200000" in response.answer or "4,200,000" in response.answer
+
+
+def test_faithfulness_gate_rejection_sets_fallback_flag(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, min_retrieval_score=0.01))
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+
+    class UnfaithfulGenerator:
+        def generate(self, question, evidence):
+            return "South revenue was 4200000 and profit margin forecast was 999."
+
+    service.generator = UnfaithfulGenerator()
+    response = service.answer("What is South revenue?")
+    assert not response.is_no_answer
+    assert response.used_extractive_fallback
+    assert "4200000" in response.answer
+
+
+def test_faithful_generated_answer_does_not_set_fallback_flag(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, min_retrieval_score=0.01))
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+
+    class FaithfulGenerator:
+        def generate(self, question, evidence):
+            return "South revenue was 4200000."
+
+    service.generator = FaithfulGenerator()
+    response = service.answer("What is South revenue?")
+    assert not response.used_extractive_fallback
+    assert response.answer == "South revenue was 4200000."
+
+
+def test_no_generator_configured_does_not_set_fallback_flag(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, min_retrieval_score=0.01))
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+    response = service.answer("What is South revenue?")
+    assert not response.used_extractive_fallback

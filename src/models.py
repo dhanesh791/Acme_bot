@@ -84,6 +84,7 @@ class ChatResponse:
     sources: tuple[SourceMetadata, ...] = field(default_factory=tuple)
     evidence: tuple[RetrievedChunk, ...] = field(default_factory=tuple)
     is_no_answer: bool = False
+    used_extractive_fallback: bool = False  # a generated answer was rejected (or failed) and the extractive fallback is shown instead
 
 
 @dataclass(frozen=True)
