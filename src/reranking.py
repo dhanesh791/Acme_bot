@@ -4,7 +4,7 @@ import functools
 from dataclasses import replace
 from typing import Protocol
 
-from .embeddings import MODEL_CACHE_DIR
+from .config import MODEL_CACHE_DIR
 from .models import RetrievedChunk
 
 

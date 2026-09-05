@@ -55,7 +55,17 @@ The browser session is the access boundary. Session indexes are automatically re
 
 Copy `.env.example` to `.env` and configure `OPENAI_API_KEY` before starting the app (`.env` is loaded automatically via `python-dotenv`). The app then uses OpenAI embeddings and a zero-temperature grounded-generation prompt on top of the same hybrid-retrieval-plus-rerank pipeline. Without a key it still does real semantic retrieval (local FastEmbed embeddings, hybrid search, reranking) but returns retrieved evidence verbatim as the answer instead of LLM prose, since there's no model to generate with.
 
-A generated answer is only shown if it passes a deterministic faithfulness check (`src/evaluation.py`) against the retrieved evidence and is not itself a refusal; otherwise the app logs a warning and falls back to the extractive answer. An existing knowledge base remembers which embedding model indexed it (`embedding_model` per chunk); indexing or asking questions with a different provider is refused with a message to clear the knowledge base first, rather than silently corrupting retrieval scores.
+A generated answer is only shown if it passes a deterministic faithfulness check (`src/evaluation.py`) against the retrieved evidence and is not itself a refusal; otherwise the app shows the extractive fallback **and a small notice in the chat UI** saying so (this used to be log-only).
+
+### Optional fully-local generation (no API key, no internet at answer time)
+
+Set `GENERATION_PROVIDER=local` to generate real prose answers with a small local LLM (default `microsoft/Phi-3.5-mini-instruct-onnx`, int4, via `onnxruntime-genai`) instead of OpenAI or the extractive fallback. This is **not** the default even without an API key - unlike local embeddings, it's an explicit opt-in, because it's a genuinely different trade-off:
+
+- **~2.8GB one-time download** (vs. ~150MB for the embedding + reranker models combined), cached under `data/model_cache/` like everything else.
+- **Noticeably slower per answer** - roughly 5-15s on CPU for a short answer once the model is loaded (the first call in a process also pays a one-time load cost). The UI's spinner message changes to say so in this mode.
+- Runs through the exact same faithfulness gate and citation pipeline as OpenAI generation - grounding guarantees don't change, only where the model runs.
+
+Everything else (`GENERATION_PROVIDER=openai`, `=none`, or the `auto` default) behaves as already described above.
 
 ## Validation
 
@@ -63,7 +73,7 @@ A generated answer is only shown if it passes a deterministic faithfulness check
 python -m pytest -q
 ```
 
-The tests cover CSV metadata, chunk row ranges, unsupported/legacy errors, retrieval with citations, no-answer behavior, embedding-model mismatch guards, stubbed OpenAI embedding/generation calls, and the hybrid retrieval/reranking/MMR pipeline - including a couple of real (not mocked) tests against the small local FastEmbed and cross-encoder models, since those are local dependencies rather than a paid API. First run downloads ~150MB of cached ONNX models; offline and fast on every run after that.
+The tests cover CSV metadata, chunk row ranges, unsupported/legacy errors, retrieval with citations, no-answer behavior, embedding-model mismatch guards, stubbed OpenAI embedding/generation calls, and the hybrid retrieval/reranking/MMR pipeline - including a couple of real (not mocked) tests against the small local FastEmbed and cross-encoder models, since those are local dependencies rather than a paid API. First run downloads ~150MB of cached ONNX models; offline and fast on every run after that. One further test exercises the local LLM generator for real, but only if it's already been downloaded (`GENERATION_PROVIDER=local`, ~2.8GB) - it skips cleanly on a fresh clone or CI rather than triggering that download unexpectedly.
 
 If pytest fails with a Windows `PermissionError`/`WinError 5` under a long path (common when the project lives inside OneDrive), it is a `tmp_path`/LanceDB `MAX_PATH` issue, not a code failure. Point pytest at a short base directory instead:
 

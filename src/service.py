@@ -14,7 +14,7 @@ from .embeddings import (
     cosine_similarity,
 )
 from .evaluation import evaluate_faithfulness
-from .generation import OpenAIAnswerGenerator
+from .generation import AnswerGenerator, LocalLLMGenerator, OpenAIAnswerGenerator
 from .logging_config import logger
 from .models import ChatResponse, IndexingResult, RetrievedChunk, SourceMetadata
 from .parsers import parse_document
@@ -49,20 +49,45 @@ def _select_reranker(app_settings: Settings) -> Reranker:
     return CrossEncoderReranker(app_settings.reranker_model) if app_settings.use_reranker else NoopReranker()
 
 
+def _select_generator(app_settings: Settings) -> AnswerGenerator | None:
+    """generation_provider="auto" prefers OpenAI when a key is configured, otherwise
+    the extractive fallback (unchanged default - the local LLM is a ~2.8GB download
+    with much higher per-answer latency, so it needs an explicit "local" opt-in
+    rather than being silently auto-selected the way local embeddings are)."""
+    provider = app_settings.generation_provider
+    if provider == "none":
+        return None
+    if provider == "openai" or (provider == "auto" and app_settings.openai_api_key):
+        if not app_settings.openai_api_key:
+            raise ValueError("generation_provider='openai' requires OPENAI_API_KEY to be set.")
+        return OpenAIAnswerGenerator(app_settings.openai_api_key, app_settings.openai_chat_model)
+    if provider == "local":
+        return LocalLLMGenerator(app_settings.local_llm_model_repo, app_settings.local_llm_model_variant, app_settings.local_llm_max_new_tokens)
+    if provider == "auto":
+        return None
+    raise ValueError(f"Unknown generation_provider setting: '{provider}'.")
+
+
 class RagService:
     def __init__(self, app_settings: Settings = settings, workspace_id: str = "default") -> None:
         self.settings = app_settings
         self.embeddings: EmbeddingProvider = _select_embedding_provider(app_settings)
         self.reranker: Reranker = _select_reranker(app_settings)
-        self.generator = OpenAIAnswerGenerator(app_settings.openai_api_key, app_settings.openai_chat_model) if app_settings.openai_api_key else None
+        self.generator: AnswerGenerator | None = _select_generator(app_settings)
         self.store = LocalVectorStore(app_settings.index_path / workspace_id)
 
     def health_check(self) -> dict[str, str | bool]:
+        if self.generator is None:
+            answer_mode = "Local extractive fallback"
+        elif isinstance(self.generator, LocalLLMGenerator):
+            answer_mode = f"Local LLM grounded generation ({self.generator.model_name})"
+        else:
+            answer_mode = "OpenAI grounded generation"
         return {
             "status": "ready",
             "embedding_provider": self.embeddings.model_name,
             "reranker": type(self.reranker).__name__,
-            "answer_mode": "OpenAI grounded generation" if self.generator else "Local extractive fallback",
+            "answer_mode": answer_mode,
             "api_key_configured": bool(self.settings.openai_api_key),
             "vector_store": "LanceDB (hybrid vector + BM25)",
         }
@@ -205,7 +230,14 @@ LLM_REFUSAL_PREFIX = "i can't answer that from the indexed documents"
 
 
 def _is_llm_refusal(generated_answer: str) -> bool:
-    return generated_answer.strip().lower().startswith(LLM_REFUSAL_PREFIX)
+    # Substring, not startswith: confirmed empirically that a smaller local model
+    # (unlike OpenAI at temperature 0) often explains itself first and puts the exact
+    # refusal phrase at the end rather than leading with it, e.g. "The provided
+    # context does not contain information about X. I can't answer that from the
+    # indexed documents." A strict prefix check misses this and lets an
+    # unsupported-sounding answer through to the faithfulness gate instead of a clean
+    # no-answer response.
+    return LLM_REFUSAL_PREFIX in generated_answer.strip().lower()
 
 
 def _unique_sources(evidence: tuple[RetrievedChunk, ...]) -> tuple[SourceMetadata, ...]:

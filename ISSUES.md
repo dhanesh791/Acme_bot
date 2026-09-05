@@ -42,6 +42,12 @@ each with its fix. Full technical detail for anything below lives in `tasks.md`.
 - **The local ONNX models defaulted to caching in the OS Temp directory**, which Windows or a cleanup tool can silently clear, forcing a surprise ~150MB re-download. → Pointed the cache at `data/model_cache/`, the same stable location already used for the vector index and logs.
 - **The faithfulness-gate fallback was invisible to the user.** When a generated answer failed the groundedness check, the extractive fallback was shown with no indication anything had gone differently — only the log recorded it. → Added a `used_extractive_fallback` flag and a small UI notice.
 
+### Adding fully-local answer generation (opt-in, at explicit request)
+
+- **`llama-cpp-python`, the standard way to run local LLMs, wasn't viable on this machine.** No prebuilt Windows wheel on PyPI (only a source tarball), and no C++ compiler or CMake installed to build it. → Used `onnxruntime-genai` instead (Microsoft's own local-LLM runtime, same ONNX family already used for embeddings/reranking) — it has a prebuilt Windows wheel and installed cleanly.
+- **Downloading the model failed with a Windows symlink permission error** (`WinError 1314`) — `huggingface_hub`'s default cache mechanism symlinks each file from a content-addressed blob store, which needs Developer Mode or admin rights on Windows. Forcing copy-instead-of-symlink (`HF_HUB_DISABLE_SYMLINKS=1`) hit a second failure in the same code path (copying into a not-yet-created directory). → Switched to `local_dir` instead of `cache_dir` on `snapshot_download`, which downloads straight into a plain folder and avoids the blob/symlink layer entirely.
+- **The local model's refusals didn't match how the code detected them.** `_is_llm_refusal` checked for the refusal phrase as a *prefix*, matching OpenAI's behavior at temperature 0. The smaller local model often explains itself first instead, e.g. "The provided context does not contain information about X. I can't answer that from the indexed documents." — phrase at the end. A strict prefix check missed this and would have let an unsupported-sounding answer through instead of a clean no-answer response. → Check substring containment instead of prefix.
+
 ### Development/tooling problems (not application bugs)
 
 - **Windows `MAX_PATH` broke pytest under this machine's long OneDrive path.** Not a code defect. → Documented the `--basetemp=<short path>` workaround in the README.

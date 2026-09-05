@@ -12,10 +12,10 @@ from src.chunking import chunk_records
 from src.config import Settings
 from src.embeddings import HashEmbeddingProvider, OpenAIEmbeddingProvider, cosine_similarity
 from src.evaluation import evaluate_faithfulness
-from src.generation import OpenAIAnswerGenerator
+from src.generation import LocalLLMGenerator, OpenAIAnswerGenerator
 from src.models import Chunk, ExtractedRecord, RetrievedChunk, SourceMetadata
 from src.parsers import DocumentParseError, parse_document
-from src.service import GUARDRAIL_REFUSAL, NO_ANSWER, RagService, _is_llm_refusal, _mmr_select
+from src.service import GUARDRAIL_REFUSAL, NO_ANSWER, RagService, _is_llm_refusal, _mmr_select, _select_generator
 from src.reranking import CrossEncoderReranker, NoopReranker
 
 
@@ -565,3 +565,49 @@ def test_no_generator_configured_does_not_set_fallback_flag(tmp_path: Path) -> N
     service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
     response = service.answer("What is South revenue?")
     assert not response.used_extractive_fallback
+
+
+def test_generator_selection_resolves_by_setting() -> None:
+    assert _select_generator(Settings(generation_provider="none")) is None
+    assert _select_generator(Settings(generation_provider="auto")) is None  # no key, no auto-fallthrough to local
+    local = _select_generator(Settings(generation_provider="local"))
+    assert isinstance(local, LocalLLMGenerator)
+    with pytest.raises(ValueError, match="requires OPENAI_API_KEY"):
+        _select_generator(Settings(generation_provider="openai"))
+
+
+def test_llm_refusal_detected_even_with_a_preamble() -> None:
+    # Confirmed empirically: a smaller local model (unlike OpenAI at temperature 0)
+    # often explains itself before the exact refusal phrase rather than leading with
+    # it. The check must catch both shapes.
+    assert _is_llm_refusal("I can't answer that from the indexed documents.")
+    assert _is_llm_refusal(
+        "The provided context does not contain information about vacation policy. "
+        "I can't answer that from the indexed documents."
+    )
+    assert not _is_llm_refusal("South revenue was 4200000.")
+
+
+def test_local_llm_generator_produces_a_grounded_answer(tmp_path: Path) -> None:
+    """Real (non-mocked) test against the actual downloaded local model - skipped if
+    it isn't present, since it's an explicit ~2.8GB opt-in download (see
+    GENERATION_PROVIDER=local in .env.example), not something a fresh clone or CI
+    run should trigger unexpectedly."""
+    from src.config import MODEL_CACHE_DIR
+
+    model_dir = Path(MODEL_CACHE_DIR) / "microsoft--Phi-3.5-mini-instruct-onnx"
+    if not model_dir.exists():
+        pytest.skip("local LLM not downloaded; set GENERATION_PROVIDER=local and run once to fetch it")
+
+    service = RagService(Settings(
+        data_dir=tmp_path,
+        embedding_provider="local",
+        use_reranker=True,
+        min_retrieval_score=0.2,
+        generation_provider="local",
+    ))
+    service.index_document("sales.csv", b"Region,Revenue,Target\nSouth,4200000,4000000\n")
+    response = service.answer("What was South region revenue and target?")
+    assert not response.is_no_answer
+    assert not response.used_extractive_fallback
+    assert "4200000" in response.answer or "4,200,000" in response.answer

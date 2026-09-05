@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
+# Shared by every local ONNX model loader (embeddings, reranker, local LLM generation).
+# A fixed, stable location under data/ rather than fastembed's own default of the OS
+# temp directory, which Windows or a cleanup tool can silently clear (see ISSUES.md).
+MODEL_CACHE_DIR = str(PROJECT_ROOT / "data" / "model_cache")
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -33,6 +38,17 @@ class Settings:
     min_rerank_score: float = float(os.getenv("MIN_RERANK_SCORE", "-6.0"))
     rrf_k: int = int(os.getenv("RRF_K", "60"))
     mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.65"))
+    # "auto" = OpenAI when a key is configured, else the extractive fallback (unchanged
+    # default). Unlike embedding_provider, "auto" does NOT fall through to the local LLM -
+    # even the smallest well-supported option is a ~2.8GB download with much higher
+    # per-answer latency than either OpenAI or the instant extractive fallback, so it
+    # needs an explicit opt-in ("local") rather than being silently auto-selected.
+    # "openai" forces OpenAI (errors without a key); "none" forces the extractive
+    # fallback even when a key is configured.
+    generation_provider: str = os.getenv("GENERATION_PROVIDER", "auto")
+    local_llm_model_repo: str = os.getenv("LOCAL_LLM_MODEL_REPO", "microsoft/Phi-3.5-mini-instruct-onnx")
+    local_llm_model_variant: str = os.getenv("LOCAL_LLM_MODEL_VARIANT", "cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4")
+    local_llm_max_new_tokens: int = int(os.getenv("LOCAL_LLM_MAX_NEW_TOKENS", "300"))
 
     @property
     def index_path(self) -> Path:

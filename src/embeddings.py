@@ -9,13 +9,7 @@ import urllib.request
 from collections import Counter
 from typing import Protocol
 
-from .config import PROJECT_ROOT
-
-# fastembed defaults to tempfile.gettempdir() when no cache_dir is given, which on
-# Windows means the OS or a cleanup tool can silently wipe the ~65-150MB cached model
-# and force a re-download. Use the same stable data/ directory the rest of the app
-# already relies on for persistent storage (LanceDB, logs).
-MODEL_CACHE_DIR = str(PROJECT_ROOT / "data" / "model_cache")
+from .config import MODEL_CACHE_DIR
 
 
 class EmbeddingProvider(Protocol):

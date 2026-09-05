@@ -6,6 +6,7 @@ import uuid
 
 import streamlit as st
 
+from src.generation import LocalLLMGenerator
 from src.parsers import DocumentParseError
 from src.service import RagService
 
@@ -222,7 +223,12 @@ def main() -> None:
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("Searching indexed documents..."):
+            spinner_text = (
+                "Searching indexed documents and generating an answer locally (can take up to a minute on CPU)..."
+                if isinstance(service.generator, LocalLLMGenerator)
+                else "Searching indexed documents..."
+            )
+            with st.spinner(spinner_text):
                 filters = {}
                 if selected_file != "All files":
                     filters["file_name"] = selected_file
