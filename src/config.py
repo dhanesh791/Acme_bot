@@ -35,7 +35,7 @@ class Settings:
     use_reranker: bool = os.getenv("USE_RERANKER", "true").strip().lower() not in ("0", "false", "no")
     reranker_model: str = os.getenv("RERANKER_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
     rerank_candidate_pool: int = int(os.getenv("RERANK_CANDIDATE_POOL", "20"))
-    min_rerank_score: float = float(os.getenv("MIN_RERANK_SCORE", "-6.0"))
+    min_rerank_score: float = float(os.getenv("MIN_RERANK_SCORE", "-11.0"))
     rrf_k: int = int(os.getenv("RRF_K", "60"))
     mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.65"))
     # "auto" = OpenAI when a key is configured, else the extractive fallback (unchanged
