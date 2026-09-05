@@ -639,3 +639,64 @@ def test_rerank_gate_admits_vague_meta_questions_against_relevant_content(tmp_pa
     response = service.answer("what is the usecase?")
     assert not response.is_no_answer
     assert response.sources
+
+
+def test_session_start_is_logged_with_workspace_and_providers(tmp_path: Path, caplog) -> None:
+    with caplog.at_level("INFO", logger="acme_rag"):
+        RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none"), workspace_id="ws-123")
+    assert any("event=session_start" in r.message and "workspace=ws-123" in r.message for r in caplog.records)
+
+
+def test_successful_index_logs_info_with_event_tag(tmp_path: Path, caplog) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none"), workspace_id="ws-index")
+    with caplog.at_level("INFO", logger="acme_rag"):
+        service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+    matches = [r for r in caplog.records if "event=index_success" in r.message]
+    assert matches
+    assert matches[0].levelname == "INFO"
+    assert "workspace=ws-index" in matches[0].message
+    assert "file=sales.csv" in matches[0].message
+
+
+def test_corrupt_file_logs_expected_failure_at_warning_not_error(tmp_path: Path, caplog) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none"))
+    with caplog.at_level("WARNING", logger="acme_rag"):
+        with pytest.raises(DocumentParseError):
+            service.index_document("broken.xlsx", b"not-a-zip")
+    matches = [r for r in caplog.records if "event=index_failure_expected" in r.message]
+    assert matches
+    assert matches[0].levelname == "WARNING"
+    # A routine, expected failure should not carry a full traceback.
+    assert matches[0].exc_info is None
+
+
+def test_oversized_upload_is_logged_before_raising(tmp_path: Path, caplog) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none", max_upload_bytes=10))
+    with caplog.at_level("WARNING", logger="acme_rag"):
+        with pytest.raises(ValueError, match="upload limit"):
+            service.index_document("big.csv", b"Region,Revenue\nSouth,4200000\n")
+    assert any("event=index_rejected" in r.message and "reason=upload_too_large" in r.message for r in caplog.records)
+
+
+def test_successful_answer_logs_outcome_with_source_count(tmp_path: Path, caplog) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none", min_retrieval_score=0.01), workspace_id="ws-answer")
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+    with caplog.at_level("INFO", logger="acme_rag"):
+        service.answer("What is South revenue?")
+    matches = [r for r in caplog.records if "event=answer_success" in r.message]
+    assert matches
+    assert "workspace=ws-answer" in matches[0].message
+    assert "sources=1" in matches[0].message
+    assert "fallback=False" in matches[0].message
+
+
+def test_no_answer_below_threshold_is_logged_at_info_not_warning(tmp_path: Path, caplog) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none", min_retrieval_score=0.99))
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+    with caplog.at_level("INFO", logger="acme_rag"):
+        service.answer("What is South revenue?")
+    matches = [r for r in caplog.records if "event=answer_no_answer" in r.message]
+    assert matches
+    # Insufficient evidence is a correct, expected outcome - not a warning or error.
+    assert matches[0].levelname == "INFO"
+    assert "reason=below_retrieval_threshold" in matches[0].message

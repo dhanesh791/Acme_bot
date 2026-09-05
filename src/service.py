@@ -17,7 +17,7 @@ from .evaluation import evaluate_faithfulness
 from .generation import AnswerGenerator, LocalLLMGenerator, OpenAIAnswerGenerator
 from .logging_config import logger
 from .models import ChatResponse, IndexingResult, RetrievedChunk, SourceMetadata
-from .parsers import parse_document
+from .parsers import DocumentParseError, parse_document
 from .reranking import CrossEncoderReranker, NoopReranker, Reranker
 from .vector_store import LocalVectorStore
 
@@ -71,10 +71,16 @@ def _select_generator(app_settings: Settings) -> AnswerGenerator | None:
 class RagService:
     def __init__(self, app_settings: Settings = settings, workspace_id: str = "default") -> None:
         self.settings = app_settings
+        self.workspace_id = workspace_id
         self.embeddings: EmbeddingProvider = _select_embedding_provider(app_settings)
         self.reranker: Reranker = _select_reranker(app_settings)
         self.generator: AnswerGenerator | None = _select_generator(app_settings)
         self.store = LocalVectorStore(app_settings.index_path / workspace_id)
+        logger.info(
+            "event=session_start workspace=%s embedding_provider=%s reranker=%s generator=%s",
+            workspace_id, self.embeddings.model_name, type(self.reranker).__name__,
+            type(self.generator).__name__ if self.generator else "none",
+        )
 
     def health_check(self) -> dict[str, str | bool]:
         if self.generator is None:
@@ -105,14 +111,22 @@ class RagService:
                 shutil.rmtree(workspace)
                 removed += 1
         if removed:
-            logger.info("expired session indexes removed=%s", removed)
+            logger.info("event=session_cleanup removed=%s", removed)
         return removed
 
     def index_document(self, file_name: str, payload: bytes) -> IndexingResult:
         if len(payload) > self.settings.max_upload_bytes:
+            logger.warning(
+                "event=index_rejected workspace=%s file=%s reason=upload_too_large bytes=%s limit_bytes=%s",
+                self.workspace_id, file_name, len(payload), self.settings.max_upload_bytes,
+            )
             raise ValueError(f"'{file_name}' exceeds the {self.settings.max_upload_bytes // 1024 // 1024} MB upload limit.")
         existing_models = self.store.embedding_models()
         if existing_models and self.embeddings.model_name not in existing_models:
+            logger.warning(
+                "event=index_rejected workspace=%s file=%s reason=embedding_model_mismatch stored=%s active=%s",
+                self.workspace_id, file_name, existing_models, self.embeddings.model_name,
+            )
             raise ValueError(
                 f"This knowledge base was indexed with {', '.join(sorted(existing_models))}; "
                 f"the active embedding provider is '{self.embeddings.model_name}'. "
@@ -124,15 +138,25 @@ class RagService:
             document_id = records[0].source.document_id
             warnings = tuple(sorted({warning for record in records for warning in record.warnings}))
             if self.store.has_document_id(document_id):
+                logger.info("event=index_unchanged workspace=%s file=%s", self.workspace_id, file_name)
                 return IndexingResult(file_name, document_id, "unchanged", len(records), 0, warnings)
             status = "replaced" if file_name in self.store.documents() else "indexed"
             chunks = chunk_records(records, self.settings.chunk_rows, self.settings.chunk_max_chars)
             vectors = self._embed_in_batches([chunk.text for chunk in chunks])
             self.store.upsert(chunks, vectors, self.embeddings.model_name)
-            logger.info("indexed file=%s records=%s chunks=%s elapsed_ms=%.0f", file_name, len(records), len(chunks), (time.perf_counter() - started) * 1000)
+            logger.info(
+                "event=index_success workspace=%s file=%s status=%s records=%s chunks=%s bytes=%s warnings=%s elapsed_ms=%.0f",
+                self.workspace_id, file_name, status, len(records), len(chunks), len(payload), len(warnings), (time.perf_counter() - started) * 1000,
+            )
             return IndexingResult(file_name, document_id, status, len(records), len(chunks), warnings)
+        except DocumentParseError as exc:
+            # Expected, routine failure (corrupt/unsupported file) - a user-facing
+            # validation outcome, not a system fault. Logged without a traceback so it
+            # doesn't drown out genuine errors in the log.
+            logger.warning("event=index_failure_expected workspace=%s file=%s reason=%s", self.workspace_id, file_name, exc)
+            raise
         except Exception:
-            logger.exception("indexing failed file=%s", file_name)
+            logger.exception("event=index_failure_unexpected workspace=%s file=%s", self.workspace_id, file_name)
             raise
 
     def answer(self, question: str, filters: dict[str, str | int] | None = None) -> ChatResponse:
@@ -141,11 +165,11 @@ class RagService:
             return ChatResponse(answer=NO_ANSWER, is_no_answer=True)
         blocked = (*INJECTION_PATTERNS, *UNSAFE_PATTERNS)
         if len(question) > MAX_QUESTION_CHARS or any(re.search(pattern, question, re.IGNORECASE) for pattern in blocked):
-            logger.warning("guardrail refusal query_chars=%s", len(question))
+            logger.warning("event=guardrail_refusal workspace=%s query_chars=%s", self.workspace_id, len(question))
             return ChatResponse(answer=GUARDRAIL_REFUSAL, is_no_answer=True)
         existing_models = self.store.embedding_models()
         if existing_models and self.embeddings.model_name not in existing_models:
-            logger.warning("embedding model mismatch stored=%s active=%s", existing_models, self.embeddings.model_name)
+            logger.warning("event=embedding_mismatch workspace=%s stored=%s active=%s", self.workspace_id, existing_models, self.embeddings.model_name)
             return ChatResponse(
                 answer=(
                     "The knowledge base was indexed with a different embedding model "
@@ -161,7 +185,7 @@ class RagService:
             filters,
             rrf_k=self.settings.rrf_k,
         )
-        logger.info("retrieval query_chars=%s candidates=%s elapsed_ms=%.0f", len(question), len(retrieved), (time.perf_counter() - started) * 1000)
+        logger.info("event=retrieval workspace=%s query_chars=%s candidates=%s elapsed_ms=%.0f", self.workspace_id, len(question), len(retrieved), (time.perf_counter() - started) * 1000)
         # Hybrid retrieval (dense vector + BM25 full-text) covers lexical matching, so
         # this gate is not about finding lexical matches. It exists for a different
         # reason: the local hash embedding's 256-dim hashed-bag-of-words geometry
@@ -177,10 +201,14 @@ class RagService:
             and (not requires_lexical_overlap or _has_lexical_overlap(question, match.chunk.text))
         ]
         if not threshold_passed:
+            logger.info(
+                "event=answer_no_answer workspace=%s reason=below_retrieval_threshold elapsed_ms=%.0f",
+                self.workspace_id, (time.perf_counter() - started) * 1000,
+            )
             return ChatResponse(answer=NO_ANSWER, evidence=tuple(retrieved), is_no_answer=True)
         rerank_started = time.perf_counter()
         reranked = self.reranker.rerank(question, threshold_passed)
-        logger.info("rerank candidates=%s elapsed_ms=%.0f", len(reranked), (time.perf_counter() - rerank_started) * 1000)
+        logger.info("event=rerank workspace=%s candidates=%s elapsed_ms=%.0f", self.workspace_id, len(reranked), (time.perf_counter() - rerank_started) * 1000)
         # A real reranker's relevance judgment is materially more reliable than cosine
         # similarity alone on short, structured chunk text (e.g. "Field: value | Field:
         # value" rows), where an unrelated question can still score misleadingly high
@@ -189,6 +217,10 @@ class RagService:
         # so this is a no-op when reranking is disabled.
         rerank_gated = [item for item in reranked if item.rerank_score is None or item.rerank_score >= self.settings.min_rerank_score]
         if not rerank_gated:
+            logger.info(
+                "event=answer_no_answer workspace=%s reason=below_rerank_threshold elapsed_ms=%.0f",
+                self.workspace_id, (time.perf_counter() - started) * 1000,
+            )
             return ChatResponse(answer=NO_ANSWER, evidence=tuple(threshold_passed), is_no_answer=True)
         evidence = tuple(_mmr_select(rerank_gated, self.settings.retrieval_top_k, self.settings.mmr_lambda))
         sources = _unique_sources(evidence)
@@ -198,16 +230,28 @@ class RagService:
             try:
                 generated = self.generator.generate(question, evidence)
                 if _is_llm_refusal(generated):
+                    logger.info(
+                        "event=answer_no_answer workspace=%s reason=llm_refusal elapsed_ms=%.0f",
+                        self.workspace_id, (time.perf_counter() - started) * 1000,
+                    )
                     return ChatResponse(answer=NO_ANSWER, evidence=evidence, is_no_answer=True)
                 evaluation = evaluate_faithfulness(generated, evidence)
                 if evaluation.is_faithful:
                     answer = generated
                 else:
-                    logger.warning("generation failed faithfulness gate supported_ratio=%.2f", evaluation.supported_ratio)
+                    logger.warning(
+                        "event=faithfulness_rejected workspace=%s supported_ratio=%.2f",
+                        self.workspace_id, evaluation.supported_ratio,
+                    )
                     used_extractive_fallback = True
             except Exception:
-                logger.exception("generation failed; returning extractive fallback")
+                logger.exception("event=generation_failure workspace=%s", self.workspace_id)
                 used_extractive_fallback = True
+        logger.info(
+            "event=answer_success workspace=%s sources=%s generator=%s fallback=%s elapsed_ms=%.0f",
+            self.workspace_id, len(sources), type(self.generator).__name__ if self.generator else "none",
+            used_extractive_fallback, (time.perf_counter() - started) * 1000,
+        )
         return ChatResponse(answer=answer, sources=sources, evidence=evidence, is_no_answer=False, used_extractive_fallback=used_extractive_fallback)
 
     def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
@@ -220,8 +264,12 @@ class RagService:
                     break
                 except Exception:
                     if attempt == self.settings.embedding_max_retries:
-                        logger.exception("embedding failed batch_start=%s attempts=%s", start, attempt)
+                        logger.exception("event=embedding_failure workspace=%s batch_start=%s attempts=%s", self.workspace_id, start, attempt)
                         raise
+                    logger.warning(
+                        "event=embedding_retry workspace=%s batch_start=%s attempt=%s of %s",
+                        self.workspace_id, start, attempt, self.settings.embedding_max_retries,
+                    )
                     time.sleep(0.5 * attempt)
         return vectors
 

@@ -40,7 +40,7 @@ class LocalVectorStore:
         try:
             table.create_index("text", config=FTS(), replace=True)
         except Exception:
-            logger.exception("failed to build full-text search index; hybrid retrieval will fall back to vector-only")
+            logger.exception("event=fts_index_build_failed; hybrid retrieval will fall back to vector-only")
 
     def search(
         self,
@@ -74,7 +74,7 @@ class LocalVectorStore:
                     fts_query = fts_query.where(where)
                 fts_hits = fts_query.to_list()
             except Exception:
-                logger.exception("full-text search failed; continuing with vector-only results")
+                logger.exception("event=fts_search_failed; continuing with vector-only results")
 
         fused_ranks: dict[str, float] = {}
         entries_by_id: dict[str, dict] = {}

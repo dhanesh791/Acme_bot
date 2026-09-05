@@ -67,13 +67,26 @@ Set `GENERATION_PROVIDER=local` to generate real prose answers with a small loca
 
 Everything else (`GENERATION_PROVIDER=openai`, `=none`, or the `auto` default) behaves as already described above.
 
+## Logging
+
+Everything logs to `data/app.log` (rotating, 3×1MB backups, excluded from Git). Every line carries an `event=` tag and, for anything tied to a browser session, `workspace=<id>` - so `grep workspace=<id> data/app.log` gives the complete trace for one session, and `grep event=answer data/app.log` gives every question outcome across all of them.
+
+| Level | Events | Meaning |
+| --- | --- | --- |
+| INFO | `session_start`, `index_success`, `index_unchanged`, `session_cleanup` | Normal, successful operations. |
+| INFO | `retrieval`, `rerank`, `answer_success`, `answer_no_answer` | Every question's outcome, always logged - `answer_no_answer` (reason: `below_retrieval_threshold` / `below_rerank_threshold` / `llm_refusal`) is a correct, expected result, not a failure, so it's INFO, not WARNING. |
+| WARNING | `guardrail_refusal`, `embedding_mismatch`, `index_rejected` (reason: `upload_too_large` / `embedding_model_mismatch`), `index_failure_expected`, `faithfulness_rejected`, `embedding_retry` | Expected, handled failures - a user hit a real limit or a corrupt/unsupported file, not a bug. No stack trace, to keep these from drowning out genuine errors. |
+| ERROR (with traceback) | `index_failure_unexpected`, `generation_failure`, `embedding_failure`, `fts_index_build_failed`, `fts_search_failed` | Something actually went wrong - a real exception, not a validation outcome. |
+
+`index_success` also includes `bytes=` (upload size) and `warnings=` (count of parser warnings, e.g. malformed CSV rows); `answer_success` includes `sources=`, `generator=`, and `fallback=` (whether the faithfulness gate rejected a generated answer and fell back to the extractive one). Distinguishing *expected* failures (`_expected` suffix, `WARNING`, no traceback) from *unexpected* ones (`_failure`/`_unexpected`, `ERROR`, full traceback via `logger.exception`) is deliberate: a user uploading a corrupt file is routine and shouldn't look like a system fault in the log.
+
 ## Validation
 
 ```powershell
 python -m pytest -q
 ```
 
-The tests cover CSV metadata, chunk row ranges, unsupported/legacy errors, retrieval with citations, no-answer behavior, embedding-model mismatch guards, stubbed OpenAI embedding/generation calls, and the hybrid retrieval/reranking/MMR pipeline - including a couple of real (not mocked) tests against the small local FastEmbed and cross-encoder models, since those are local dependencies rather than a paid API. First run downloads ~150MB of cached ONNX models; offline and fast on every run after that. One further test exercises the local LLM generator for real, but only if it's already been downloaded (`GENERATION_PROVIDER=local`, ~2.8GB) - it skips cleanly on a fresh clone or CI rather than triggering that download unexpectedly.
+The tests cover CSV metadata, chunk row ranges, unsupported/legacy errors, retrieval with citations, no-answer behavior, embedding-model mismatch guards, stubbed OpenAI embedding/generation calls, the hybrid retrieval/reranking/MMR pipeline, and log output itself (correct `event=` tags and levels for successful/expected-failure/no-answer paths via `caplog`) - including a couple of real (not mocked) tests against the small local FastEmbed and cross-encoder models, since those are local dependencies rather than a paid API. First run downloads ~150MB of cached ONNX models; offline and fast on every run after that. One further test exercises the local LLM generator for real, but only if it's already been downloaded (`GENERATION_PROVIDER=local`, ~2.8GB) - it skips cleanly on a fresh clone or CI rather than triggering that download unexpectedly.
 
 If pytest fails with a Windows `PermissionError`/`WinError 5` under a long path (common when the project lives inside OneDrive), it is a `tmp_path`/LanceDB `MAX_PATH` issue, not a code failure. Point pytest at a short base directory instead:
 

@@ -144,7 +144,13 @@ def initialize_state() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("indexed_uploads", set())
     st.session_state.setdefault("workspace_id", uuid.uuid4().hex)
-    st.session_state.setdefault("service", RagService(workspace_id=st.session_state.workspace_id))
+    # Not setdefault(...): Python evaluates RagService(...) eagerly on every call
+    # regardless of whether the key already exists, so setdefault would silently
+    # construct (and discard) a throwaway RagService - LanceDB connection, provider
+    # selection, and all - on every single rerun (i.e. every click or keystroke).
+    # Confirmed by the new event=session_start log firing repeatedly per session.
+    if "service" not in st.session_state:
+        st.session_state.service = RagService(workspace_id=st.session_state.workspace_id)
 
 
 def main() -> None:
