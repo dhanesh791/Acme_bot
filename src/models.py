@@ -85,6 +85,8 @@ class ChatResponse:
     evidence: tuple[RetrievedChunk, ...] = field(default_factory=tuple)
     is_no_answer: bool = False
     used_extractive_fallback: bool = False  # a generated answer was rejected (or failed) and the extractive fallback is shown instead
+    confidence: float | None = None  # 0-1, strength of the best supporting evidence; None only when is_no_answer
+    confidence_label: str | None = None  # "High" | "Medium" | "Low"; None only when is_no_answer
 
 
 @dataclass(frozen=True)

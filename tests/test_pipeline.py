@@ -15,7 +15,7 @@ from src.evaluation import evaluate_faithfulness
 from src.generation import LocalLLMGenerator, OpenAIAnswerGenerator
 from src.models import Chunk, ExtractedRecord, RetrievedChunk, SourceMetadata
 from src.parsers import DocumentParseError, parse_document
-from src.service import GUARDRAIL_REFUSAL, NO_ANSWER, RagService, _is_llm_refusal, _mmr_select, _select_generator
+from src.service import GUARDRAIL_REFUSAL, NO_ANSWER, RagService, _compute_confidence, _is_llm_refusal, _mmr_select, _select_generator
 from src.reranking import CrossEncoderReranker, NoopReranker
 
 
@@ -700,3 +700,61 @@ def test_no_answer_below_threshold_is_logged_at_info_not_warning(tmp_path: Path,
     # Insufficient evidence is a correct, expected outcome - not a warning or error.
     assert matches[0].levelname == "INFO"
     assert "reason=below_retrieval_threshold" in matches[0].message
+
+
+def test_compute_confidence_uses_reranker_score_when_available() -> None:
+    source = SourceMetadata("sales.csv", "csv", "doc", row_start=2)
+    strong = RetrievedChunk(Chunk("c1", "Region: South | Revenue: 4200000", source), 0.9, rerank_score=8.2)
+    borderline = RetrievedChunk(Chunk("c2", "Region: South | Revenue: 4200000", source), 0.4, rerank_score=-2.41)
+    at_the_gate_floor = RetrievedChunk(Chunk("c3", "Region: South | Revenue: 4200000", source), 0.2, rerank_score=-11.0)
+
+    score, label = _compute_confidence((strong,), min_retrieval_score=0.12)
+    assert label == "High"
+    assert score > 0.7
+
+    score, label = _compute_confidence((borderline,), min_retrieval_score=0.12)
+    assert label == "Low"
+
+    score, label = _compute_confidence((at_the_gate_floor,), min_retrieval_score=0.12)
+    assert label == "Low"
+    assert 0.0 <= score < 0.4
+
+
+def test_compute_confidence_picks_the_best_of_multiple_chunks() -> None:
+    source = SourceMetadata("sales.csv", "csv", "doc", row_start=2)
+    weak = RetrievedChunk(Chunk("c1", "weak", source), 0.3, rerank_score=-9.0)
+    strong = RetrievedChunk(Chunk("c2", "strong", source), 0.9, rerank_score=6.0)
+    score, label = _compute_confidence((weak, strong), min_retrieval_score=0.12)
+    assert label == "High"
+
+
+def test_compute_confidence_falls_back_to_cosine_without_a_reranker() -> None:
+    source = SourceMetadata("sales.csv", "csv", "doc", row_start=2)
+    near_perfect = RetrievedChunk(Chunk("c1", "text", source), 0.98, rerank_score=None)
+    just_above_floor = RetrievedChunk(Chunk("c2", "text", source), 0.13, rerank_score=None)
+
+    score, label = _compute_confidence((near_perfect,), min_retrieval_score=0.12)
+    assert label == "High"
+    assert score > 0.9
+
+    score, label = _compute_confidence((just_above_floor,), min_retrieval_score=0.12)
+    assert label == "Low"
+    assert score < 0.05
+
+
+def test_answer_response_carries_confidence_when_answered(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="local", use_reranker=True, generation_provider="none", min_retrieval_score=0.2))
+    service.index_document("sales.csv", b"Region,Revenue,Target\nSouth,4200000,4000000\n")
+    response = service.answer("What is South revenue?")
+    assert not response.is_no_answer
+    assert response.confidence is not None
+    assert response.confidence_label in ("High", "Medium", "Low")
+
+
+def test_no_answer_response_has_no_confidence(tmp_path: Path) -> None:
+    service = RagService(Settings(data_dir=tmp_path, embedding_provider="hash", use_reranker=False, generation_provider="none", min_retrieval_score=0.99))
+    service.index_document("sales.csv", b"Region,Revenue\nSouth,4200000\n")
+    response = service.answer("What is South revenue?")
+    assert response.is_no_answer
+    assert response.confidence is None
+    assert response.confidence_label is None

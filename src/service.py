@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 import re
 import shutil
@@ -247,12 +248,16 @@ class RagService:
             except Exception:
                 logger.exception("event=generation_failure workspace=%s", self.workspace_id)
                 used_extractive_fallback = True
+        confidence, confidence_label = _compute_confidence(evidence, self.settings.min_retrieval_score)
         logger.info(
-            "event=answer_success workspace=%s sources=%s generator=%s fallback=%s elapsed_ms=%.0f",
+            "event=answer_success workspace=%s sources=%s generator=%s fallback=%s confidence=%.2f elapsed_ms=%.0f",
             self.workspace_id, len(sources), type(self.generator).__name__ if self.generator else "none",
-            used_extractive_fallback, (time.perf_counter() - started) * 1000,
+            used_extractive_fallback, confidence, (time.perf_counter() - started) * 1000,
         )
-        return ChatResponse(answer=answer, sources=sources, evidence=evidence, is_no_answer=False, used_extractive_fallback=used_extractive_fallback)
+        return ChatResponse(
+            answer=answer, sources=sources, evidence=evidence, is_no_answer=False,
+            used_extractive_fallback=used_extractive_fallback, confidence=confidence, confidence_label=confidence_label,
+        )
 
     def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
@@ -312,6 +317,31 @@ def _extractive_answer(evidence: tuple[RetrievedChunk, ...]) -> str:
     """Honest no-key fallback: presents retrieved facts verbatim instead of fabricating prose."""
     snippets = [item.chunk.text.replace("\n", " ") for item in evidence[:2]]
     return "Based on the indexed evidence: " + " ".join(snippets)
+
+
+def _compute_confidence(evidence: tuple[RetrievedChunk, ...], min_retrieval_score: float) -> tuple[float, str]:
+    """Confidence in the answer's best supporting evidence - not in the model's own
+    wording, and not lowered by a faithfulness-gate fallback: an extractive fallback
+    is the retrieved text verbatim, so it is exactly as grounded as a generated
+    answer that passed the gate. Both concerns are handled separately upstream; this
+    only measures how strong the evidence itself is.
+
+    A real reranker's judgment is used when available (its scores are unbounded
+    logits, so they're sigmoid-compressed around the MIN_RERANK_SCORE gate floor:
+    a candidate that barely cleared the gate reads as low confidence, a strongly
+    positive score - specific factual matches score +4 to +8 in practice, see
+    ISSUES.md - reads as high). Without a reranker (NoopReranker/hash provider),
+    cosine similarity is rescaled linearly from the retrieval threshold up to a
+    perfect match instead.
+    """
+    best = max(evidence, key=lambda item: item.rerank_score if item.rerank_score is not None else item.score)
+    if best.rerank_score is not None:
+        score = 1.0 / (1.0 + math.exp(-best.rerank_score / 4.0))
+    else:
+        span = max(1.0 - min_retrieval_score, 1e-6)
+        score = max(0.0, min(1.0, (best.score - min_retrieval_score) / span))
+    label = "High" if score >= 0.7 else "Medium" if score >= 0.4 else "Low"
+    return score, label
 
 
 def _mmr_select(ranked_candidates: list[RetrievedChunk], limit: int, lambda_mult: float) -> list[RetrievedChunk]:

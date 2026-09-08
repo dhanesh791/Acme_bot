@@ -9,7 +9,7 @@ A small interview prototype for asking grounded questions across CSV, Excel, Pow
 - Upload and index `.csv`, `.xlsx`, `.pptx`, and `.docx` documents.
 - Preserve source metadata: file, CSV row, Excel sheet/row range, PowerPoint slide/title, and Word section/paragraph range.
 - Retrieve with a hybrid dense-vector + BM25 pipeline, cross-encoder reranking, and MMR diversity selection, and return only retrieved evidence.
-- Show citations and inspect the exact retrieved chunks in the chat UI.
+- Show citations, a confidence badge, and inspect the exact retrieved chunks in the chat UI.
 - Decline questions that lack relevant indexed evidence.
 
 Legacy `.xls`, `.ppt`, and `.doc` files are detected but intentionally require conversion to modern formats for this prototype. PowerPoint speaker notes are extracted when present and exposed by the library. Word documents are parsed in document order: `Heading n`-styled paragraphs become section boundaries, body paragraphs are grouped under their nearest preceding heading, and tables are extracted row-by-row independently of surrounding prose.
@@ -67,6 +67,12 @@ Set `GENERATION_PROVIDER=local` to generate real prose answers with a small loca
 
 Everything else (`GENERATION_PROVIDER=openai`, `=none`, or the `auto` default) behaves as already described above.
 
+### Confidence scores
+
+Every answered response carries a `High` / `Medium` / `Low` confidence badge in the UI, plus the underlying 0-100% score. It measures **how strong the best supporting evidence is** - not the model's fluency, and it is not lowered when the faithfulness gate rejects a generated answer in favor of the extractive fallback: the fallback is the retrieved text verbatim, so it's exactly as grounded as a generated answer that passed the gate. That distinction is handled separately (the fallback notice above); confidence answers a different question.
+
+When the cross-encoder reranker is active, confidence is its own score for the best-matching chunk, sigmoid-compressed centered on the `MIN_RERANK_SCORE` gate floor - a candidate that barely cleared the no-answer gate reads as low confidence, a strongly positive match (specific factual matches score +4 to +8 in practice) reads as high. Without a reranker (e.g. `USE_RERANKER=false`), confidence falls back to the retrieval cosine score, linearly rescaled from `MIN_RETRIEVAL_SCORE` up to a perfect match. A no-answer response has no confidence score - there's no evidence to rate.
+
 ## Logging
 
 Everything logs to `data/app.log` (rotating, 3×1MB backups, excluded from Git). Every line carries an `event=` tag and, for anything tied to a browser session, `workspace=<id>` - so `grep workspace=<id> data/app.log` gives the complete trace for one session, and `grep event=answer data/app.log` gives every question outcome across all of them.
@@ -78,7 +84,7 @@ Everything logs to `data/app.log` (rotating, 3×1MB backups, excluded from Git).
 | WARNING | `guardrail_refusal`, `embedding_mismatch`, `index_rejected` (reason: `upload_too_large` / `embedding_model_mismatch`), `index_failure_expected`, `faithfulness_rejected`, `embedding_retry` | Expected, handled failures - a user hit a real limit or a corrupt/unsupported file, not a bug. No stack trace, to keep these from drowning out genuine errors. |
 | ERROR (with traceback) | `index_failure_unexpected`, `generation_failure`, `embedding_failure`, `fts_index_build_failed`, `fts_search_failed` | Something actually went wrong - a real exception, not a validation outcome. |
 
-`index_success` also includes `bytes=` (upload size) and `warnings=` (count of parser warnings, e.g. malformed CSV rows); `answer_success` includes `sources=`, `generator=`, and `fallback=` (whether the faithfulness gate rejected a generated answer and fell back to the extractive one). Distinguishing *expected* failures (`_expected` suffix, `WARNING`, no traceback) from *unexpected* ones (`_failure`/`_unexpected`, `ERROR`, full traceback via `logger.exception`) is deliberate: a user uploading a corrupt file is routine and shouldn't look like a system fault in the log.
+`index_success` also includes `bytes=` (upload size) and `warnings=` (count of parser warnings, e.g. malformed CSV rows); `answer_success` includes `sources=`, `generator=`, `fallback=` (whether the faithfulness gate rejected a generated answer and fell back to the extractive one), and `confidence=` (the same score shown in the UI badge). Distinguishing *expected* failures (`_expected` suffix, `WARNING`, no traceback) from *unexpected* ones (`_failure`/`_unexpected`, `ERROR`, full traceback via `logger.exception`) is deliberate: a user uploading a corrupt file is routine and shouldn't look like a system fault in the log.
 
 ## Validation
 

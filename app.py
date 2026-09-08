@@ -83,6 +83,33 @@ section[data-testid="stSidebar"] h3 {
     white-space: nowrap;
 }
 
+.acme-confidence-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.22rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin: 0.35rem 0 0.5rem;
+    border: 1px solid transparent;
+}
+.acme-confidence-badge--high {
+    background: #ECFDF5;
+    color: #047857;
+    border-color: #A7F3D0;
+}
+.acme-confidence-badge--medium {
+    background: #FFFBEB;
+    color: #B45309;
+    border-color: #FDE68A;
+}
+.acme-confidence-badge--low {
+    background: #FEF2F2;
+    color: #B91C1C;
+    border-color: #FECACA;
+}
+
 .stButton > button {
     border-radius: 8px;
     font-weight: 600;
@@ -129,6 +156,20 @@ def render_citations(citations: list[str]) -> None:
         return
     pills = "".join(f'<span class="acme-citation-pill">{html.escape(citation)}</span>' for citation in citations)
     st.markdown(f'<div class="acme-citation-row">{pills}</div>', unsafe_allow_html=True)
+
+
+def render_confidence(confidence: float | None, confidence_label: str | None) -> None:
+    """Show how strong the best supporting evidence was - not the model's fluency,
+    and not lowered by a faithfulness-gate fallback (see _compute_confidence in
+    src/service.py). Omitted entirely for no-answer responses, where it's meaningless."""
+    if confidence is None or confidence_label is None:
+        return
+    icon = {"High": "🟢", "Medium": "🟡", "Low": "🔴"}.get(confidence_label, "")
+    css_class = f"acme-confidence-badge--{confidence_label.lower()}"
+    st.markdown(
+        f'<span class="acme-confidence-badge {css_class}">{icon} {confidence_label} confidence ({confidence:.0%})</span>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_fallback_notice(used_fallback: bool) -> None:
@@ -220,6 +261,7 @@ def main() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
+                render_confidence(message.get("confidence"), message.get("confidence_label"))
                 render_citations(message.get("citations", []))
                 render_fallback_notice(message.get("used_fallback", False))
 
@@ -248,6 +290,7 @@ def main() -> None:
                     filters["section_title"] = selected_section
                 response = service.answer(prompt, filters)
             st.markdown(response.answer)
+            render_confidence(response.confidence, response.confidence_label)
             citations = [source.citation() for source in response.sources]
             render_citations(citations)
             render_fallback_notice(response.used_extractive_fallback)
@@ -264,6 +307,8 @@ def main() -> None:
                 "content": response.answer,
                 "citations": citations,
                 "used_fallback": response.used_extractive_fallback,
+                "confidence": response.confidence,
+                "confidence_label": response.confidence_label,
             }
         )
 
